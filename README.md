@@ -1,65 +1,32 @@
-# Self-Growing Knowledge Base (MindVault)
+# MindVault v0.2
 
-这是一个**完整、可运行、可持续增长**的知识库系统，采用**多 Agent 任务网格（Task Mesh）**，并支持**Workspace（工作空间）隔离**。
+MindVault 已从“可运行流水线”升级为“可治理的自增长知识系统”。
 
-## 你关心的两件事（已实现）
+## 核心升级
 
-1. **可视化可直接看数据库结果**
-   - 每次运行都会生成：
-     - `graph_data.json`（关系图节点/边）
-     - `dashboard.html`（可直接打开查看实体、事件、关系、KPI）
-2. **Agent 能互相传递任务，方便二次编辑**
-   - 使用 `workflow/default_workflow.json` 定义任务类型到 Agent 的路由。
-   - 你只要修改这个 JSON，就能调整编排顺序或替换 Agent。
+- Claim 中间层：parser 先产出 claims + candidates，再进入 merge。
+- 统一置信度：claims/entities/events/relations 都带 `confidence/source_refs/status/updated_at`。
+- 冲突审计：自动生成 `governance/conflicts.json`。
+- Schema 演化：新字段先进入候选池，再按阈值晋升。
+- Placeholder 生命周期：结构化对象与状态流转。
+- 版本管理升级：每次运行同时生成 snapshot + changelog。
+- 分层目录：`raw/extracted/canonical/snapshots/reports/visuals/governance/config`。
+- LLM 抽象层：新增 OpenAI-compatible client/router 与模型路由配置。
+- Dashboard 治理化：新增 KPI、冲突、placeholder、schema candidates、version diff、agent trace 面板。
+- 最小 benchmark + regression tests。
 
-## 架构设计
-
-### 1) Task Mesh 多 Agent 编排
-
-核心文件：
-- `agent_mesh.py`：任务队列、路由、执行追踪
-- `agent_runtime.py`：注册各 Agent handler，并通过任务流串起来
-- `workflow/default_workflow.json`：可编辑工作流
-
-任务流默认如下：
-
-`ingest.start -> parse.request -> dedup.request -> relation.request -> placeholder.request -> kb.merge.request -> insight.request -> version.request -> report.request -> visualize.request`
-
-### 2) Workspace 隔离
-
-通过 `WorkspaceManager` 实现：
-
-- `output/workspaces/<workspace_id>/knowledge_base.json`
-- `output/workspaces/<workspace_id>/snapshots/kb_snapshot_v*.json`
-- `output/workspaces/<workspace_id>/report.md`
-- `output/workspaces/<workspace_id>/visuals/dashboard.html`
-- `output/workspaces/<workspace_id>/visuals/graph_data.json`
-- `output/workspaces/<workspace_id>/agent_trace.json`
-
-## 项目结构
+## 目录结构
 
 ```text
-project/
-├── agent_mesh.py
-├── agent_runtime.py
-├── workflow/
-│   └── default_workflow.json
-├── workspace_manager.py
-├── ingestor.py
-├── parser.py
-├── deduplicator.py
-├── relation_builder.py
-├── knowledge_base.py
-├── placeholder_manager.py
-├── version_manager.py
-├── insight_generator.py
-├── visualizer.py
-├── main.py
-├── sample_data/
-│   └── raw_inputs.json
-├── output/
-├── requirements.txt
-└── README.md
+output/workspaces/<workspace_id>/
+├── raw/
+├── extracted/
+├── canonical/
+├── snapshots/
+├── reports/
+├── visuals/
+├── governance/
+└── config/
 ```
 
 ## 运行
@@ -68,16 +35,43 @@ project/
 python3 main.py --workspace demo --input sample_data/raw_inputs.json
 ```
 
-## 二次编辑建议
+## 关键产物
 
-- **改编排顺序**：编辑 `workflow/default_workflow.json`。
-- **替换单个 Agent**：在 `agent_runtime.py` 的 `_register_handlers()` 中替换对应 handler。
-- **扩展新任务**：新增 `task_type` 与 handler，并在 workflow 里加路由。
+- `extracted/claims_v*.json`
+- `canonical/knowledge_base.json`
+- `canonical/schema.json`
+- `canonical/taxonomy.json`
+- `governance/conflicts.json`
+- `governance/placeholders.json`
+- `governance/schema_candidates.json`
+- `snapshots/kb_snapshot_v*.json`
+- `snapshots/changelog_v*.json`
+- `visuals/dashboard.html`
+- `visuals/graph_data.json`
 
+## 模型配置（OpenAI-compatible）
 
-## 关于冲突（重要）
+使用 `config/model_config.json`：
 
-`output/workspaces/` 下的文件属于运行时产物（快照、trace、dashboard、graph 数据），会在每次运行后变化，
-现在已通过 `.gitignore` 忽略，默认**不提交到 Git**，以减少分支合并冲突。
+- `base_url`
+- `api_key_env`
+- `model`
+- `routing`（parse/insight/report）
 
-如需查看结果，请本地运行后直接打开对应 workspace 的 `dashboard.html`。
+环境变量示例：
+
+```bash
+export OPENAI_API_KEY=your_key
+```
+
+## 测试
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+## 示例数据集
+
+- `sample_data/benchmarks/semi_structured.json`
+- `sample_data/benchmarks/noisy_chat.json`
+- `sample_data/benchmarks/conflicting_multi_source.json`
