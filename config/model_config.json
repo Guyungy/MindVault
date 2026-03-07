@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "parser_model": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "gpt-4o-mini"
+    },
+    "insight_model": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "gpt-4o-mini"
+    }
+  },
+  "routing": {
+    "parse": "parser_model",
+    "insight": "insight_model",
+    "report": "insight_model"
+  }
+}

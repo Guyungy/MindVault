@@ -8,9 +8,9 @@ class DeduplicatorAgent:
     """Merges entities by normalized (type, name)."""
 
     def deduplicate(self, parsed: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-        entities = parsed["entities"]
-        events = parsed["events"]
-        relations = parsed["relations"]
+        entities = parsed.get("entity_candidates", parsed.get("entities", []))
+        events = parsed.get("event_candidates", parsed.get("events", []))
+        relations = parsed.get("relation_candidates", parsed.get("relations", []))
 
         merged: Dict[str, Dict[str, Any]] = {}
         id_map: Dict[str, str] = {}
@@ -28,6 +28,8 @@ class DeduplicatorAgent:
                     **merged[key].get("placeholders", {}),
                     **ent.get("placeholders", {}),
                 }
+                merged[key]["source_refs"] = sorted(set(merged[key].get("source_refs", []) + ent.get("source_refs", [])))
+                merged[key]["confidence"] = round(max(merged[key].get("confidence", 0.6), ent.get("confidence", 0.6)), 3)
             id_map[ent["id"]] = merged[key]["id"]
 
         dedup_entities = list(merged.values())
@@ -39,7 +41,7 @@ class DeduplicatorAgent:
             rel["source"] = id_map.get(rel["source"], rel["source"])
             rel["target"] = id_map.get(rel["target"], rel["target"])
 
-        parsed["entities"] = dedup_entities
-        parsed["events"] = events
-        parsed["relations"] = relations
+        parsed["entity_candidates"] = dedup_entities
+        parsed["event_candidates"] = events
+        parsed["relation_candidates"] = relations
         return parsed

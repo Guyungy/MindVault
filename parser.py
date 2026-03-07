@@ -1,9 +1,13 @@
-"""Parser and schema designer agents for extracting structured objects."""
+"""Parser and schema designer agents for extracting structured objects and claims."""
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from datetime import datetime
 from typing import Dict, Any, List, Tuple
 import re
+
+from claim_model import Claim
+from confidence_engine import ConfidenceEngine
 
 
 @dataclass
@@ -13,9 +17,16 @@ class Entity:
     name: str
     attributes: Dict[str, Any]
     placeholders: Dict[str, str]
+    confidence: float = 0.6
+    source_refs: List[str] | None = None
+    updated_at: str = ""
+    status: str = "active"
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["source_refs"] = payload.get("source_refs") or []
+        payload["updated_at"] = payload.get("updated_at") or datetime.utcnow().isoformat()
+        return payload
 
 
 @dataclass
@@ -26,9 +37,16 @@ class Event:
     timestamp: str
     entities: List[str]
     attributes: Dict[str, Any]
+    confidence: float = 0.6
+    source_refs: List[str] | None = None
+    updated_at: str = ""
+    status: str = "active"
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["source_refs"] = payload.get("source_refs") or []
+        payload["updated_at"] = payload.get("updated_at") or datetime.utcnow().isoformat()
+        return payload
 
 
 @dataclass
@@ -37,9 +55,16 @@ class Relation:
     target: str
     relation: str
     evidence: str
+    confidence: float = 0.6
+    source_refs: List[str] | None = None
+    updated_at: str = ""
+    status: str = "active"
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["source_refs"] = payload.get("source_refs") or []
+        payload["updated_at"] = payload.get("updated_at") or datetime.utcnow().isoformat()
+        return payload
 
 
 class ParserAgent:
@@ -52,13 +77,18 @@ class ParserAgent:
         (r"team\s+member\s+([A-Z][a-z]+)", "person"),
     ]
 
-    def parse(self, docs: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    def __init__(self) -> None:
+        self.confidence_engine = ConfidenceEngine()
+
+    def parse(self, docs: List[Dict[str, Any]], workspace_id: str = "default") -> Dict[str, List[Dict[str, Any]]]:
         entities: List[Entity] = []
         events: List[Event] = []
         relations: List[Relation] = []
+        claims: List[Dict[str, Any]] = []
 
         for idx, doc in enumerate(docs, start=1):
             text = doc["text"]
+            source_ref = doc.get("source", f"doc_{idx}")
             found_entity_ids: List[str] = []
 
             for pattern, entity_type in self.entity_patterns:
@@ -67,45 +97,133 @@ class ParserAgent:
                     entity_id = f"ent_{entity_type}_{self._slug(name)}"
                     placeholders = self._extract_placeholders(text)
                     attributes = self._extract_attributes(text)
-                    entities.append(
-                        Entity(
-                            id=entity_id,
-                            type=entity_type,
-                            name=name,
-                            attributes=attributes,
-                            placeholders=placeholders,
-                        )
+                    entity = Entity(
+                        id=entity_id,
+                        type=entity_type,
+                        name=name,
+                        attributes=attributes,
+                        placeholders=placeholders,
+                        source_refs=[source_ref],
                     )
+                    entities.append(entity)
                     found_entity_ids.append(entity_id)
+                    claims.extend(self._claims_for_entity(entity, text, workspace_id, source_ref, doc))
 
             if any(k in text.lower() for k in ["appointment", "update", "scheduled", "maintenance"]):
                 event_id = f"evt_{idx}"
-                events.append(
-                    Event(
-                        id=event_id,
-                        type="update",
-                        description=text,
-                        timestamp=doc["timestamp"],
-                        entities=found_entity_ids,
-                        attributes=self._extract_attributes(text),
-                    )
+                event = Event(
+                    id=event_id,
+                    type="update",
+                    description=text,
+                    timestamp=doc["timestamp"],
+                    entities=found_entity_ids,
+                    attributes=self._extract_attributes(text),
+                    source_refs=[source_ref],
+                )
+                events.append(event)
+                claims.append(
+                    Claim(
+                        id=f"claim_event_{event_id}",
+                        workspace_id=workspace_id,
+                        subject=event_id,
+                        predicate="description",
+                        object=text,
+                        claim_text=text,
+                        claim_type=self._classify_claim(text),
+                        source_ref=source_ref,
+                        speaker=doc.get("speaker", "unknown"),
+                        claim_time=doc.get("timestamp", datetime.utcnow().isoformat()),
+                    ).to_dict()
                 )
                 if len(found_entity_ids) >= 2:
-                    relations.append(
-                        Relation(
-                            source=found_entity_ids[0],
-                            target=found_entity_ids[1],
-                            relation="mentioned_within_event",
-                            evidence=text,
-                        )
+                    relation = Relation(
+                        source=found_entity_ids[0],
+                        target=found_entity_ids[1],
+                        relation="mentioned_within_event",
+                        evidence=text,
+                        source_refs=[source_ref],
+                    )
+                    relations.append(relation)
+                    claims.append(
+                        Claim(
+                            id=f"claim_rel_{idx}_{self._slug(found_entity_ids[0])}",
+                            workspace_id=workspace_id,
+                            subject=relation.source,
+                            predicate=relation.relation,
+                            object=relation.target,
+                            claim_text=text,
+                            claim_type=self._classify_claim(text),
+                            source_ref=source_ref,
+                            speaker=doc.get("speaker", "unknown"),
+                            claim_time=doc.get("timestamp", datetime.utcnow().isoformat()),
+                        ).to_dict()
                     )
 
+        self.confidence_engine.annotate_items([e.__dict__ for e in entities])
+        self.confidence_engine.annotate_items([e.__dict__ for e in events])
+        self.confidence_engine.annotate_items([r.__dict__ for r in relations])
+        for claim in claims:
+            claim["confidence"] = self.confidence_engine.score_claim(claim)
+            claim.setdefault("status", "active")
+            claim.setdefault("updated_at", datetime.utcnow().isoformat())
+            claim.setdefault("source_refs", [claim.get("source_ref", "")])
+
         return {
-            "entities": [e.to_dict() for e in entities],
-            "events": [e.to_dict() for e in events],
-            "relations": [r.to_dict() for r in relations],
+            "entity_candidates": [e.to_dict() for e in entities],
+            "event_candidates": [e.to_dict() for e in events],
+            "relation_candidates": [r.to_dict() for r in relations],
+            "claims": claims,
             "schema": SchemaDesignerAgent().design(entities, events, relations),
         }
+
+    def _claims_for_entity(self, entity: Entity, text: str, workspace_id: str, source_ref: str, doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+        claims: List[Dict[str, Any]] = []
+        claim_type = self._classify_claim(text)
+        claims.append(
+            Claim(
+                id=f"claim_{entity.id}_name",
+                workspace_id=workspace_id,
+                subject=entity.id,
+                predicate="name",
+                object=entity.name,
+                claim_text=text,
+                claim_type=claim_type,
+                source_ref=source_ref,
+                speaker=doc.get("speaker", "unknown"),
+                claim_time=doc.get("timestamp", datetime.utcnow().isoformat()),
+            ).to_dict()
+        )
+        for key, value in entity.attributes.items():
+            claims.append(
+                Claim(
+                    id=f"claim_{entity.id}_{self._slug(key)}",
+                    workspace_id=workspace_id,
+                    subject=entity.id,
+                    predicate=key,
+                    object=value,
+                    claim_text=text,
+                    claim_type=claim_type,
+                    source_ref=source_ref,
+                    speaker=doc.get("speaker", "unknown"),
+                    claim_time=doc.get("timestamp", datetime.utcnow().isoformat()),
+                ).to_dict()
+            )
+        return claims
+
+    @staticmethod
+    def _classify_claim(text: str) -> str:
+        lowered = text.lower()
+        if any(token in lowered for token in ["广告", "promotion", "buy now", "limited offer"]):
+            return "ad"
+        if any(token in lowered for token in ["听说", "rumor", "据说"]):
+            return "rumor"
+        if any(token in lowered for token in ["觉得", "i think", "opinion"]):
+            return "opinion"
+        if any(token in lowered for token in ["好像", "maybe", "uncertain"]):
+            return "uncertain"
+        if any(token in lowered for token in ["曾经", "historical", "以前"]):
+            return "historical"
+        return "fact"
 
     @staticmethod
     def _extract_attributes(text: str) -> Dict[str, Any]:
@@ -155,8 +273,9 @@ class SchemaDesignerAgent:
             "event_types": event_types,
             "relation_types": relation_types,
             "fields": {
-                "entity": ["id", "type", "name", "attributes", "placeholders"],
-                "event": ["id", "type", "description", "timestamp", "entities", "attributes"],
-                "relation": ["source", "target", "relation", "evidence"],
+                "entity": ["id", "type", "name", "attributes", "placeholders", "confidence", "source_refs", "updated_at", "status"],
+                "event": ["id", "type", "description", "timestamp", "entities", "attributes", "confidence", "source_refs", "updated_at", "status"],
+                "relation": ["source", "target", "relation", "evidence", "confidence", "source_refs", "updated_at", "status"],
+                "claim": ["id", "subject", "predicate", "object", "claim_type", "source_ref", "confidence", "status"],
             },
         }

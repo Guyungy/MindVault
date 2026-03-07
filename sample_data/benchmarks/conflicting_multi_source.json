@@ -1,0 +1,14 @@
+[
+  {
+    "source": "official_doc",
+    "author": "admin",
+    "timestamp": "2026-01-03T10:00:00Z",
+    "text": "Technician Carol works at venue East Center with $100 package."
+  },
+  {
+    "source": "chat",
+    "author": "guest",
+    "timestamp": "2026-01-03T12:00:00Z",
+    "text": "Technician Carol now offers $180 package at venue East Center update."
+  }
+]
