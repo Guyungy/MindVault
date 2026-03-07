@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'>
+  <title>Knowledge Base Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    h1, h2 { margin: 0.5rem 0; }
+    .kpi { display: flex; gap: 16px; margin: 12px 0 20px; }
+    .card { padding: 12px; border: 1px solid #ddd; border-radius: 8px; min-width: 160px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f6f6f6; }
+    code { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Workspace Knowledge Base Dashboard</h1>
+  <div class='kpi'>
+    <div class='card'><strong>Entities</strong><div>5</div></div>
+    <div class='card'><strong>Events</strong><div>3</div></div>
+    <div class='card'><strong>Relations</strong><div>11</div></div>
+    <div class='card'><strong>Insights</strong><div>2</div></div>
+  </div>
+  <h2>Entities</h2>
+  <table><thead><tr><th>id</th><th>type</th><th>name</th><th>attributes</th><th>placeholders</th></tr></thead><tbody><tr><td><code>ent_technician_alice</code></td><td><code>technician</code></td><td><code>Alice</code></td><td><code>{&quot;tags&quot;: [], &quot;price&quot;: 120.0, &quot;duration_hours&quot;: 3}</code></td><td><code>{&quot;phone&quot;: &quot;missing&quot;, &quot;email&quot;: &quot;missing&quot;, &quot;location&quot;: &quot;missing&quot;}</code></td></tr><tr><td><code>ent_venue_north_hub</code></td><td><code>venue</code></td><td><code>North Hub</code></td><td><code>{&quot;tags&quot;: [&quot;recommended&quot;], &quot;price&quot;: 120.0, &quot;duration_hours&quot;: 3}</code></td><td><code>{&quot;phone&quot;: &quot;missing&quot;, &quot;email&quot;: &quot;missing&quot;, &quot;location&quot;: &quot;missing&quot;}</code></td></tr><tr><td><code>ent_product_sensor_x_received_rating_4</code></td><td><code>product</code></td><td><code>Sensor-X Received Rating 4</code></td><td><code>{&quot;tags&quot;: [&quot;urgent&quot;], &quot;rating&quot;: 4.7}</code></td><td><code>{&quot;phone&quot;: &quot;missing&quot;, &quot;email&quot;: &quot;missing&quot;, &quot;location&quot;: &quot;missing&quot;}</code></td></tr><tr><td><code>ent_person_bob</code></td><td><code>person</code></td><td><code>Bob</code></td><td><code>{&quot;tags&quot;: [&quot;urgent&quot;], &quot;rating&quot;: 4.7}</code></td><td><code>{&quot;phone&quot;: &quot;missing&quot;, &quot;email&quot;: &quot;missing&quot;, &quot;location&quot;: &quot;missing&quot;}</code></td></tr><tr><td><code>ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week</code></td><td><code>venue</code></td><td><code>North Hub Noted Technician Alice For Follow-Up Update Next Week</code></td><td><code>{&quot;tags&quot;: []}</code></td><td><code>{&quot;email&quot;: &quot;missing&quot;, &quot;phone&quot;: &quot;missing&quot;, &quot;location&quot;: &quot;missing&quot;}</code></td></tr></tbody></table>
+  <h2>Events</h2>
+  <table><thead><tr><th>id</th><th>type</th><th>timestamp</th><th>entities</th><th>attributes</th></tr></thead><tbody><tr><td><code>evt_1</code></td><td><code>update</code></td><td><code>2026-03-05T10:15:00</code></td><td><code>[&quot;ent_technician_alice&quot;, &quot;ent_venue_north_hub&quot;]</code></td><td><code>{&quot;tags&quot;: [&quot;recommended&quot;], &quot;price&quot;: 120.0, &quot;duration_hours&quot;: 3}</code></td></tr><tr><td><code>evt_2</code></td><td><code>update</code></td><td><code>2026-03-05T11:20:00</code></td><td><code>[&quot;ent_product_sensor_x_received_rating_4&quot;, &quot;ent_person_bob&quot;]</code></td><td><code>{&quot;tags&quot;: [&quot;urgent&quot;], &quot;rating&quot;: 4.7}</code></td></tr><tr><td><code>evt_3</code></td><td><code>update</code></td><td><code>2026-03-05T12:05:00</code></td><td><code>[&quot;ent_technician_alice&quot;, &quot;ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week&quot;]</code></td><td><code>{&quot;tags&quot;: []}</code></td></tr></tbody></table>
+  <h2>Relations</h2>
+  <table><thead><tr><th>source</th><th>target</th><th>relation</th><th>evidence</th></tr></thead><tbody><tr><td><code>ent_technician_alice</code></td><td><code>ent_venue_north_hub</code></td><td><code>mentioned_within_event</code></td><td><code>Technician Alice scheduled a 3 hours maintenance appointment at venue North Hub. Budget is $120 and she is highly recommended.</code></td></tr><tr><td><code>ent_product_sensor_x_received_rating_4</code></td><td><code>ent_person_bob</code></td><td><code>mentioned_within_event</code></td><td><code>Team member Bob posted an update: product Sensor-X received rating 4.7 after urgent patch.</code></td></tr><tr><td><code>ent_technician_alice</code></td><td><code>ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week</code></td><td><code>mentioned_within_event</code></td><td><code>Venue North Hub noted technician Alice for follow-up update next week; contact phone missing.</code></td></tr><tr><td><code>ent_technician_alice</code></td><td><code>ent_venue_north_hub</code></td><td><code>belongs_to_venue</code></td><td><code>Inferred from co-occurrence in ingestion batch.</code></td></tr><tr><td><code>ent_technician_alice</code></td><td><code>ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week</code></td><td><code>belongs_to_venue</code></td><td><code>Inferred from co-occurrence in ingestion batch.</code></td></tr><tr><td><code>ent_technician_alice</code></td><td><code>evt_1</code></td><td><code>participated_in</code></td><td><code>Entity referenced in event.</code></td></tr><tr><td><code>ent_venue_north_hub</code></td><td><code>evt_1</code></td><td><code>participated_in</code></td><td><code>Entity referenced in event.</code></td></tr><tr><td><code>ent_product_sensor_x_received_rating_4</code></td><td><code>evt_2</code></td><td><code>participated_in</code></td><td><code>Entity referenced in event.</code></td></tr><tr><td><code>ent_person_bob</code></td><td><code>evt_2</code></td><td><code>participated_in</code></td><td><code>Entity referenced in event.</code></td></tr><tr><td><code>ent_technician_alice</code></td><td><code>evt_3</code></td><td><code>participated_in</code></td><td><code>Entity referenced in event.</code></td></tr><tr><td><code>ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week</code></td><td><code>evt_3</code></td><td><code>participated_in</code></td><td><code>Entity referenced in event.</code></td></tr></tbody></table>
+</body>
+</html>
