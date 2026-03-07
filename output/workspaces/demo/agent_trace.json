@@ -1,0 +1,111 @@
+[
+  {
+    "agent": "IngestorAgent",
+    "step": "normalize_inputs",
+    "timestamp": "2026-03-07T04:32:05.039373",
+    "input_summary": {
+      "raw_items": 3
+    },
+    "output_summary": {
+      "normalized_docs": 3
+    }
+  },
+  {
+    "agent": "ParserAgent+SchemaDesignerAgent",
+    "step": "extract_objects",
+    "timestamp": "2026-03-07T04:32:05.043612",
+    "input_summary": {
+      "docs": 3
+    },
+    "output_summary": {
+      "entities": 6,
+      "events": 3,
+      "relations": 3,
+      "entity_types": [
+        "person",
+        "product",
+        "technician",
+        "venue"
+      ]
+    }
+  },
+  {
+    "agent": "DeduplicatorAgent",
+    "step": "merge_duplicates",
+    "timestamp": "2026-03-07T04:32:05.043642",
+    "input_summary": {},
+    "output_summary": {
+      "entities": 5
+    }
+  },
+  {
+    "agent": "RelationBuilderAgent",
+    "step": "build_relations",
+    "timestamp": "2026-03-07T04:32:05.043661",
+    "input_summary": {},
+    "output_summary": {
+      "relations": 11
+    }
+  },
+  {
+    "agent": "PlaceholderManagerAgent",
+    "step": "update_placeholders",
+    "timestamp": "2026-03-07T04:32:05.043675",
+    "input_summary": {},
+    "output_summary": {
+      "missing_placeholders": 15
+    }
+  },
+  {
+    "agent": "KnowledgeBase",
+    "step": "merge_fragment",
+    "timestamp": "2026-03-07T04:32:05.044835",
+    "input_summary": {},
+    "output_summary": {
+      "kb_entities": 5
+    }
+  },
+  {
+    "agent": "InsightGeneratorAgent",
+    "step": "generate_insights",
+    "timestamp": "2026-03-07T04:32:05.045496",
+    "input_summary": {},
+    "output_summary": {
+      "insights": 2
+    }
+  },
+  {
+    "agent": "VersionManagerAgent",
+    "step": "create_snapshot",
+    "timestamp": "2026-03-07T04:32:05.047171",
+    "input_summary": {},
+    "output_summary": {
+      "snapshot_path": "output/workspaces/demo/snapshots/kb_snapshot_v2.json",
+      "version": 2,
+      "diff": {
+        "entities_added": 0,
+        "events_added": 0,
+        "relations_added": 0
+      }
+    }
+  },
+  {
+    "agent": "InsightGeneratorAgent",
+    "step": "write_report",
+    "timestamp": "2026-03-07T04:32:05.047334",
+    "input_summary": {},
+    "output_summary": {
+      "report": "output/workspaces/demo/report.md"
+    }
+  },
+  {
+    "agent": "VisualizerAgent",
+    "step": "render_visuals",
+    "timestamp": "2026-03-07T04:32:05.047587",
+    "input_summary": {},
+    "output_summary": {
+      "graph": "output/workspaces/demo/visuals/visualization_fallback.json",
+      "distribution": ""
+    }
+  }
+]
