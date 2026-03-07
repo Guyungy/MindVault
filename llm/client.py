@@ -12,6 +12,7 @@ class LLMProviderConfig:
     base_url: str
     api_key_env: str
     model: str
+    api_key: str = ""
 
 
 class LLMClient:
@@ -19,7 +20,7 @@ class LLMClient:
         self.config = config
 
     def chat(self, prompt: str) -> Dict[str, Any]:
-        api_key = os.getenv(self.config.api_key_env, "")
+        api_key = self.config.api_key or os.getenv(self.config.api_key_env, "")
         # Placeholder implementation for offline mode; keeps API boundary centralized.
         return {
             "provider": self.config.name,

@@ -10,3 +10,5 @@ artifacts/
 .DS_Store
 .vscode/
 .idea/
+*.json
+config/model_config.json

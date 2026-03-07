@@ -26,6 +26,7 @@ class LLMRouter:
                 base_url=provider.get("base_url", ""),
                 api_key_env=provider.get("api_key_env", "OPENAI_API_KEY"),
                 model=provider.get("model", "gpt-4o-mini"),
+                api_key=provider.get("api_key", ""),
             )
         )
 
