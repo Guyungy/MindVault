@@ -1,0 +1,29 @@
+[
+  {
+    "source": "chat_log",
+    "timestamp": "2026-03-05T10:15:00",
+    "author": "OpsLead",
+    "text": "Technician Alice scheduled a 3 hours maintenance appointment at venue North Hub. Budget is $120 and she is highly recommended.",
+    "metadata": {
+      "channel": "maintenance-team"
+    }
+  },
+  {
+    "source": "forum_post",
+    "timestamp": "2026-03-05T11:20:00",
+    "author": "User42",
+    "text": "Team member Bob posted an update: product Sensor-X received rating 4.7 after urgent patch.",
+    "metadata": {
+      "url": "https://forum.example.com/thread/123"
+    }
+  },
+  {
+    "source": "ocr_document",
+    "timestamp": "2026-03-05T12:05:00",
+    "author": "OCR",
+    "text": "Venue North Hub noted technician Alice for follow-up update next week; contact phone missing.",
+    "metadata": {
+      "document_id": "scan_889"
+    }
+  }
+]

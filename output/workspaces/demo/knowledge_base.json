@@ -1,0 +1,303 @@
+{
+  "entities": [
+    {
+      "id": "ent_technician_alice",
+      "type": "technician",
+      "name": "Alice",
+      "attributes": {
+        "tags": [],
+        "price": 120.0,
+        "duration_hours": 3
+      },
+      "placeholders": {
+        "phone": "missing",
+        "email": "missing",
+        "location": "missing"
+      }
+    },
+    {
+      "id": "ent_venue_north_hub",
+      "type": "venue",
+      "name": "North Hub",
+      "attributes": {
+        "tags": [
+          "recommended"
+        ],
+        "price": 120.0,
+        "duration_hours": 3
+      },
+      "placeholders": {
+        "phone": "missing",
+        "email": "missing",
+        "location": "missing"
+      }
+    },
+    {
+      "id": "ent_product_sensor_x_received_rating_4",
+      "type": "product",
+      "name": "Sensor-X Received Rating 4",
+      "attributes": {
+        "tags": [
+          "urgent"
+        ],
+        "rating": 4.7
+      },
+      "placeholders": {
+        "phone": "missing",
+        "email": "missing",
+        "location": "missing"
+      }
+    },
+    {
+      "id": "ent_person_bob",
+      "type": "person",
+      "name": "Bob",
+      "attributes": {
+        "tags": [
+          "urgent"
+        ],
+        "rating": 4.7
+      },
+      "placeholders": {
+        "phone": "missing",
+        "email": "missing",
+        "location": "missing"
+      }
+    },
+    {
+      "id": "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week",
+      "type": "venue",
+      "name": "North Hub Noted Technician Alice For Follow-Up Update Next Week",
+      "attributes": {
+        "tags": []
+      },
+      "placeholders": {
+        "email": "missing",
+        "phone": "missing",
+        "location": "missing"
+      }
+    }
+  ],
+  "events": [
+    {
+      "id": "evt_1",
+      "type": "update",
+      "description": "Technician Alice scheduled a 3 hours maintenance appointment at venue North Hub. Budget is $120 and she is highly recommended.",
+      "timestamp": "2026-03-05T10:15:00",
+      "entities": [
+        "ent_technician_alice",
+        "ent_venue_north_hub"
+      ],
+      "attributes": {
+        "tags": [
+          "recommended"
+        ],
+        "price": 120.0,
+        "duration_hours": 3
+      }
+    },
+    {
+      "id": "evt_2",
+      "type": "update",
+      "description": "Team member Bob posted an update: product Sensor-X received rating 4.7 after urgent patch.",
+      "timestamp": "2026-03-05T11:20:00",
+      "entities": [
+        "ent_product_sensor_x_received_rating_4",
+        "ent_person_bob"
+      ],
+      "attributes": {
+        "tags": [
+          "urgent"
+        ],
+        "rating": 4.7
+      }
+    },
+    {
+      "id": "evt_3",
+      "type": "update",
+      "description": "Venue North Hub noted technician Alice for follow-up update next week; contact phone missing.",
+      "timestamp": "2026-03-05T12:05:00",
+      "entities": [
+        "ent_technician_alice",
+        "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week"
+      ],
+      "attributes": {
+        "tags": []
+      }
+    }
+  ],
+  "relations": [
+    {
+      "source": "ent_technician_alice",
+      "target": "ent_venue_north_hub",
+      "relation": "mentioned_within_event",
+      "evidence": "Technician Alice scheduled a 3 hours maintenance appointment at venue North Hub. Budget is $120 and she is highly recommended."
+    },
+    {
+      "source": "ent_product_sensor_x_received_rating_4",
+      "target": "ent_person_bob",
+      "relation": "mentioned_within_event",
+      "evidence": "Team member Bob posted an update: product Sensor-X received rating 4.7 after urgent patch."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week",
+      "relation": "mentioned_within_event",
+      "evidence": "Venue North Hub noted technician Alice for follow-up update next week; contact phone missing."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "ent_venue_north_hub",
+      "relation": "belongs_to_venue",
+      "evidence": "Inferred from co-occurrence in ingestion batch."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week",
+      "relation": "belongs_to_venue",
+      "evidence": "Inferred from co-occurrence in ingestion batch."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "evt_1",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_venue_north_hub",
+      "target": "evt_1",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_product_sensor_x_received_rating_4",
+      "target": "evt_2",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_person_bob",
+      "target": "evt_2",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "evt_3",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week",
+      "target": "evt_3",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    }
+  ],
+  "insights": [
+    {
+      "title": "Knowledge Base Growth",
+      "summary": "KB currently stores 5 entities, 3 events, and 11 relations.",
+      "metrics": {
+        "entity_type_distribution": {
+          "technician": 1,
+          "venue": 2,
+          "product": 1,
+          "person": 1
+        },
+        "missing_placeholder_fields": 15
+      }
+    },
+    {
+      "title": "Operational Recommendation",
+      "summary": "Prioritize enriching 'venue' records with missing contact details.",
+      "metrics": {
+        "dominant_entity_type": "venue"
+      }
+    }
+  ],
+  "placeholders": {
+    "ent_technician_alice": {
+      "phone": "missing",
+      "email": "missing",
+      "location": "missing"
+    },
+    "ent_venue_north_hub": {
+      "phone": "missing",
+      "email": "missing",
+      "location": "missing"
+    },
+    "ent_product_sensor_x_received_rating_4": {
+      "phone": "missing",
+      "email": "missing",
+      "location": "missing"
+    },
+    "ent_person_bob": {
+      "phone": "missing",
+      "email": "missing",
+      "location": "missing"
+    },
+    "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week": {
+      "email": "missing",
+      "phone": "missing",
+      "location": "missing"
+    }
+  },
+  "schema": {
+    "entity_types": [
+      "person",
+      "product",
+      "technician",
+      "venue"
+    ],
+    "event_types": [
+      "update"
+    ],
+    "relation_types": [
+      "mentioned_within_event"
+    ],
+    "fields": {
+      "entity": [
+        "id",
+        "type",
+        "name",
+        "attributes",
+        "placeholders"
+      ],
+      "event": [
+        "id",
+        "type",
+        "description",
+        "timestamp",
+        "entities",
+        "attributes"
+      ],
+      "relation": [
+        "source",
+        "target",
+        "relation",
+        "evidence"
+      ]
+    }
+  },
+  "version_history": [
+    {
+      "snapshot_path": "output/workspaces/demo/snapshots/kb_snapshot_v1.json",
+      "version": 1,
+      "diff": {
+        "entities_added": 5,
+        "events_added": 3,
+        "relations_added": 11
+      }
+    },
+    {
+      "snapshot_path": "output/workspaces/demo/snapshots/kb_snapshot_v2.json",
+      "version": 2,
+      "diff": {
+        "entities_added": 0,
+        "events_added": 0,
+        "relations_added": 0
+      }
+    }
+  ]
+}
