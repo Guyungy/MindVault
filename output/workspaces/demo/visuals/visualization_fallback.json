@@ -1,0 +1,81 @@
+{
+  "message": "matplotlib/networkx unavailable, exported graph data instead",
+  "nodes": [
+    "ent_technician_alice",
+    "ent_venue_north_hub",
+    "ent_product_sensor_x_received_rating_4",
+    "ent_person_bob",
+    "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week",
+    "evt_1",
+    "evt_2",
+    "evt_3"
+  ],
+  "edges": [
+    {
+      "source": "ent_technician_alice",
+      "target": "ent_venue_north_hub",
+      "relation": "mentioned_within_event",
+      "evidence": "Technician Alice scheduled a 3 hours maintenance appointment at venue North Hub. Budget is $120 and she is highly recommended."
+    },
+    {
+      "source": "ent_product_sensor_x_received_rating_4",
+      "target": "ent_person_bob",
+      "relation": "mentioned_within_event",
+      "evidence": "Team member Bob posted an update: product Sensor-X received rating 4.7 after urgent patch."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week",
+      "relation": "mentioned_within_event",
+      "evidence": "Venue North Hub noted technician Alice for follow-up update next week; contact phone missing."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "ent_venue_north_hub",
+      "relation": "belongs_to_venue",
+      "evidence": "Inferred from co-occurrence in ingestion batch."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week",
+      "relation": "belongs_to_venue",
+      "evidence": "Inferred from co-occurrence in ingestion batch."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "evt_1",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_venue_north_hub",
+      "target": "evt_1",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_product_sensor_x_received_rating_4",
+      "target": "evt_2",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_person_bob",
+      "target": "evt_2",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_technician_alice",
+      "target": "evt_3",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    },
+    {
+      "source": "ent_venue_north_hub_noted_technician_alice_for_follow_up_update_next_week",
+      "target": "evt_3",
+      "relation": "participated_in",
+      "evidence": "Entity referenced in event."
+    }
+  ]
+}
