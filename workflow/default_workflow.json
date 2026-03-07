@@ -1,0 +1,12 @@
+{
+  "ingest.start": ["ingestor"],
+  "parse.request": ["parser"],
+  "dedup.request": ["deduplicator"],
+  "relation.request": ["relation_builder"],
+  "placeholder.request": ["placeholder_manager"],
+  "kb.merge.request": ["knowledge_base"],
+  "insight.request": ["insight_generator"],
+  "version.request": ["version_manager"],
+  "report.request": ["insight_generator"],
+  "visualize.request": ["visualizer"]
+}

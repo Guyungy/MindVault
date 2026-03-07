@@ -1,101 +1,103 @@
-"""Visualizer agent: builds graph and tabular visuals for knowledge base state."""
+"""Visualizer agent: generate no-dependency HTML dashboard and graph data JSON."""
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 import json
-
-try:
-    import matplotlib.pyplot as plt  # type: ignore
-    import networkx as nx  # type: ignore
-except Exception:  # pragma: no cover
-    plt = None
-    nx = None
-
-try:
-    import pandas as pd  # type: ignore
-except Exception:  # pragma: no cover
-    pd = None
 
 
 class VisualizerAgent:
-    """Renders relation graph and entity summary chart; exports fallback JSON if libs unavailable."""
+    """Writes dashboard HTML + graph JSON so users can directly inspect KB results."""
 
     def __init__(self, out_dir: str = "output"):
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
     def visualize(self, kb: Dict[str, Any]) -> Dict[str, str]:
-        if plt is not None and nx is not None:
-            graph_path = self._plot_graph(kb)
-            table_path = self._plot_entity_distribution(kb)
-            return {"graph": graph_path, "distribution": table_path}
+        graph_path = self._export_graph_data(kb)
+        dashboard_path = self._export_dashboard(kb)
+        return {"graph": graph_path, "dashboard": dashboard_path}
 
-        fallback = self.out_dir / "visualization_fallback.json"
-        fallback.write_text(
-            json.dumps(
+    def _export_graph_data(self, kb: Dict[str, Any]) -> str:
+        graph_data = {
+            "nodes": [
                 {
-                    "message": "matplotlib/networkx unavailable, exported graph data instead",
-                    "nodes": [e["id"] for e in kb.get("entities", [])] + [ev["id"] for ev in kb.get("events", [])],
-                    "edges": kb.get("relations", []),
-                },
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        return {"graph": str(fallback), "distribution": ""}
+                    "id": e["id"],
+                    "label": e.get("name", e["id"]),
+                    "kind": e.get("type", "entity"),
+                    "placeholder": any(v == "missing" for v in e.get("placeholders", {}).values()),
+                }
+                for e in kb.get("entities", [])
+            ]
+            + [
+                {
+                    "id": ev["id"],
+                    "label": ev["id"],
+                    "kind": "event",
+                    "placeholder": False,
+                }
+                for ev in kb.get("events", [])
+            ],
+            "edges": kb.get("relations", []),
+        }
+        path = self.out_dir / "graph_data.json"
+        path.write_text(json.dumps(graph_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        return str(path)
 
-    def _plot_graph(self, kb: Dict[str, Any]) -> str:
-        G = nx.DiGraph()
+    def _export_dashboard(self, kb: Dict[str, Any]) -> str:
+        entities_table = self._to_table(kb.get("entities", []), ["id", "type", "name", "attributes", "placeholders"])
+        events_table = self._to_table(kb.get("events", []), ["id", "type", "timestamp", "entities", "attributes"])
+        relations_table = self._to_table(kb.get("relations", []), ["source", "target", "relation", "evidence"])
 
-        for ent in kb.get("entities", []):
-            label = f"{ent['name']}\n({ent['type']})"
-            if any(v == "missing" for v in ent.get("placeholders", {}).values()):
-                label += "\n[placeholder]"
-            G.add_node(ent["id"], label=label, kind="entity")
+        html = f"""<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'>
+  <title>Knowledge Base Dashboard</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    h1, h2 {{ margin: 0.5rem 0; }}
+    .kpi {{ display: flex; gap: 16px; margin: 12px 0 20px; }}
+    .card {{ padding: 12px; border: 1px solid #ddd; border-radius: 8px; min-width: 160px; }}
+    table {{ border-collapse: collapse; width: 100%; margin-bottom: 24px; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }}
+    th {{ background: #f6f6f6; }}
+    code {{ white-space: pre-wrap; }}
+  </style>
+</head>
+<body>
+  <h1>Workspace Knowledge Base Dashboard</h1>
+  <div class='kpi'>
+    <div class='card'><strong>Entities</strong><div>{len(kb.get('entities', []))}</div></div>
+    <div class='card'><strong>Events</strong><div>{len(kb.get('events', []))}</div></div>
+    <div class='card'><strong>Relations</strong><div>{len(kb.get('relations', []))}</div></div>
+    <div class='card'><strong>Insights</strong><div>{len(kb.get('insights', []))}</div></div>
+  </div>
+  <h2>Entities</h2>
+  {entities_table}
+  <h2>Events</h2>
+  {events_table}
+  <h2>Relations</h2>
+  {relations_table}
+</body>
+</html>"""
 
-        for evt in kb.get("events", []):
-            G.add_node(evt["id"], label=f"{evt['id']}\n(event)", kind="event")
+        path = self.out_dir / "dashboard.html"
+        path.write_text(html, encoding="utf-8")
+        return str(path)
 
-        for rel in kb.get("relations", []):
-            G.add_edge(rel["source"], rel["target"], relation=rel["relation"])
-
-        plt.figure(figsize=(10, 7))
-        pos = nx.spring_layout(G, seed=42)
-        node_labels = nx.get_node_attributes(G, "label")
-        node_colors = ["#8dd3c7" if G.nodes[n]["kind"] == "entity" else "#fb8072" for n in G.nodes]
-
-        nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=1700)
-        nx.draw_networkx_edges(G, pos, arrows=True, alpha=0.7)
-        nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=8)
-        edge_labels = {(u, v): d["relation"] for u, v, d in G.edges(data=True)}
-        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=7)
-
-        plt.title("Knowledge Base Relationship Graph")
-        plt.axis("off")
-        graph_path = str(self.out_dir / "knowledge_graph.png")
-        plt.tight_layout()
-        plt.savefig(graph_path, dpi=180)
-        plt.close()
-        return graph_path
-
-    def _plot_entity_distribution(self, kb: Dict[str, Any]) -> str:
-        if pd is None:
-            return ""
-        df = pd.DataFrame(kb.get("entities", []))
-        if df.empty:
-            return ""
-        counts = df["type"].value_counts().sort_values(ascending=False)
-
-        plt.figure(figsize=(7, 4))
-        counts.plot(kind="bar", color="#80b1d3")
-        plt.title("Entity Type Distribution")
-        plt.xlabel("Entity Type")
-        plt.ylabel("Count")
-        plt.tight_layout()
-
-        out_path = str(self.out_dir / "entity_distribution.png")
-        plt.savefig(out_path, dpi=180)
-        plt.close()
-        return out_path
+    @staticmethod
+    def _to_table(rows: List[Dict[str, Any]], columns: List[str]) -> str:
+        head = "".join(f"<th>{escape(col)}</th>" for col in columns)
+        body_parts: List[str] = []
+        for row in rows:
+            cols = []
+            for col in columns:
+                val = row.get(col, "")
+                if isinstance(val, (dict, list)):
+                    val = json.dumps(val, ensure_ascii=False)
+                cols.append(f"<td><code>{escape(str(val))}</code></td>")
+            body_parts.append(f"<tr>{''.join(cols)}</tr>")
+        body = "".join(body_parts) if body_parts else f"<tr><td colspan='{len(columns)}'>No data</td></tr>"
+        return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"

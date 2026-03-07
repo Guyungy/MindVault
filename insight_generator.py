@@ -4,14 +4,9 @@ from __future__ import annotations
 from collections import Counter
 from typing import Dict, Any, List
 
-try:
-    import pandas as pd  # type: ignore
-except Exception:  # pragma: no cover - graceful fallback when pandas unavailable
-    pd = None
-
 
 class InsightGeneratorAgent:
-    """Builds simple trend/recommendation insights and a human-readable report."""
+    """Build trend/recommendation insights and human-readable report/dashboard text."""
 
     def generate(self, kb: Dict[str, Any]) -> List[Dict[str, Any]]:
         entities = kb.get("entities", [])
@@ -25,13 +20,7 @@ class InsightGeneratorAgent:
             for _, v in e.get("placeholders", {}).items()
             if v == "missing"
         )
-
-        most_active = None
-        if pd is not None and entities:
-            df_entities = pd.DataFrame(entities)
-            most_active = df_entities["type"].value_counts().idxmax()
-        elif entities:
-            most_active = max(type_counts.items(), key=lambda x: x[1])[0]
+        most_active = max(type_counts.items(), key=lambda x: x[1])[0] if type_counts else None
 
         return [
             {

@@ -1,12 +1,12 @@
-"""Multi-agent runtime orchestration with explicit execution plan and traces."""
+"""Multi-agent runtime orchestration with task-passing mesh."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 import json
 
+from agent_mesh import AgentMeshRuntime, Task
 from deduplicator import DeduplicatorAgent
 from ingestor import IngestorAgent
 from insight_generator import InsightGeneratorAgent
@@ -19,106 +19,107 @@ from visualizer import VisualizerAgent
 from workspace_manager import WorkspaceContext
 
 
-@dataclass
-class AgentTrace:
-    agent: str
-    step: str
-    timestamp: str
-    input_summary: Dict[str, Any] = field(default_factory=dict)
-    output_summary: Dict[str, Any] = field(default_factory=dict)
-
-
 class MultiAgentRuntime:
-    """Drives end-to-end KB growth through modular agent stages for one workspace."""
+    """Drives KB growth by letting agents pass tasks through a configurable mesh."""
 
-    def __init__(self, context: WorkspaceContext) -> None:
+    def __init__(self, context: WorkspaceContext, workflow_path: str = "workflow/default_workflow.json") -> None:
         self.context = context
-        self.traces: List[AgentTrace] = []
+        self.mesh = AgentMeshRuntime(workflow_path=workflow_path)
+        self.kb = SelfGrowingKnowledgeBase(path=str(context.kb_path))
 
         self.ingestor = IngestorAgent()
         self.parser = ParserAgent()
         self.deduper = DeduplicatorAgent()
         self.relation_builder = RelationBuilderAgent()
         self.placeholder_manager = PlaceholderManagerAgent()
-        self.kb = SelfGrowingKnowledgeBase(path=str(context.kb_path))
-        self.version_mgr = VersionManagerAgent(out_dir=str(context.snapshot_dir))
         self.insight_gen = InsightGeneratorAgent()
+        self.version_mgr = VersionManagerAgent(out_dir=str(context.snapshot_dir))
         self.visualizer = VisualizerAgent(out_dir=str(context.visualization_dir))
 
+        self._register_handlers()
+
+    def _register_handlers(self) -> None:
+        self.mesh.register("ingestor", self._handle_ingestor)
+        self.mesh.register("parser", self._handle_parser)
+        self.mesh.register("deduplicator", self._handle_deduplicator)
+        self.mesh.register("relation_builder", self._handle_relation_builder)
+        self.mesh.register("placeholder_manager", self._handle_placeholder_manager)
+        self.mesh.register("knowledge_base", self._handle_knowledge_base)
+        self.mesh.register("insight_generator", self._handle_insight_generator)
+        self.mesh.register("version_manager", self._handle_version_manager)
+        self.mesh.register("visualizer", self._handle_visualizer)
+
     def run(self, raw_items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        normalized_docs = [d.to_dict() for d in self.ingestor.ingest(raw_items)]
-        self._trace("IngestorAgent", "normalize_inputs", {"raw_items": len(raw_items)}, {"normalized_docs": len(normalized_docs)})
-
-        parsed = self.parser.parse(normalized_docs)
-        self._trace(
-            "ParserAgent+SchemaDesignerAgent",
-            "extract_objects",
-            {"docs": len(normalized_docs)},
-            {
-                "entities": len(parsed.get("entities", [])),
-                "events": len(parsed.get("events", [])),
-                "relations": len(parsed.get("relations", [])),
-                "entity_types": parsed.get("schema", {}).get("entity_types", []),
-            },
-        )
-
-        deduped = self.deduper.deduplicate(parsed)
-        self._trace("DeduplicatorAgent", "merge_duplicates", {}, {"entities": len(deduped.get("entities", []))})
-
-        enriched = self.relation_builder.build(deduped)
-        self._trace("RelationBuilderAgent", "build_relations", {}, {"relations": len(enriched.get("relations", []))})
-
-        enriched = self.placeholder_manager.update(enriched)
-        unresolved = sum(
-            1
-            for e in enriched.get("entities", [])
-            for v in e.get("placeholders", {}).values()
-            if v == "missing"
-        )
-        self._trace("PlaceholderManagerAgent", "update_placeholders", {}, {"missing_placeholders": unresolved})
-
-        state = self.kb.merge(enriched)
-        self._trace("KnowledgeBase", "merge_fragment", {}, {"kb_entities": len(state.get("entities", []))})
-
-        insights = self.insight_gen.generate(state)
-        self.kb.append_insights(insights)
-        state = self.kb.state
-        self._trace("InsightGeneratorAgent", "generate_insights", {}, {"insights": len(insights)})
-
-        version_meta = self.version_mgr.create_snapshot(state)
-        self.kb.add_version_record(version_meta)
-        state = self.kb.state
-        self._trace("VersionManagerAgent", "create_snapshot", {}, version_meta)
-
-        report_text = self.insight_gen.generate_report_text(state, insights)
-        self.context.report_path.write_text(report_text, encoding="utf-8")
-        self._trace("InsightGeneratorAgent", "write_report", {}, {"report": str(self.context.report_path)})
-
-        viz_paths = self.visualizer.visualize(state)
-        self._trace("VisualizerAgent", "render_visuals", {}, viz_paths)
-
-        trace_path = self.context.root_dir / "agent_trace.json"
-        trace_path.write_text(
-            json.dumps([t.__dict__ for t in self.traces], indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-        return {
+        context: Dict[str, Any] = {
+            "raw_items": raw_items,
             "workspace": self.context.workspace_id,
-            "knowledge_base": str(self.context.kb_path),
-            "snapshot": version_meta["snapshot_path"],
-            "report": str(self.context.report_path),
-            "visualizations": viz_paths,
-            "trace": str(trace_path),
+            "started_at": datetime.utcnow().isoformat(),
         }
 
-    def _trace(self, agent: str, step: str, input_summary: Dict[str, Any], output_summary: Dict[str, Any]) -> None:
-        self.traces.append(
-            AgentTrace(
-                agent=agent,
-                step=step,
-                timestamp=datetime.utcnow().isoformat(),
-                input_summary=input_summary,
-                output_summary=output_summary,
-            )
-        )
+        self.mesh.run(Task(task_type="ingest.start", payload={"count": len(raw_items)}), context)
+
+        trace_path = self.context.root_dir / "agent_trace.json"
+        trace_path.write_text(json.dumps(self.mesh.traces, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        result = {
+            "workspace": self.context.workspace_id,
+            "knowledge_base": str(self.context.kb_path),
+            "snapshot": context.get("snapshot_path", ""),
+            "report": str(self.context.report_path),
+            "visualizations": context.get("visualizations", {}),
+            "trace": str(trace_path),
+            "workflow": "workflow/default_workflow.json",
+        }
+        return result
+
+    def _handle_ingestor(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        docs = [d.to_dict() for d in self.ingestor.ingest(context["raw_items"])]
+        context["docs"] = docs
+        return [Task(task_type="parse.request", payload={"docs": len(docs)}, source_agent="ingestor")]
+
+    def _handle_parser(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        parsed = self.parser.parse(context["docs"])
+        context["fragment"] = parsed
+        return [Task(task_type="dedup.request", payload={}, source_agent="parser")]
+
+    def _handle_deduplicator(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        context["fragment"] = self.deduper.deduplicate(context["fragment"])
+        return [Task(task_type="relation.request", payload={}, source_agent="deduplicator")]
+
+    def _handle_relation_builder(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        context["fragment"] = self.relation_builder.build(context["fragment"])
+        return [Task(task_type="placeholder.request", payload={}, source_agent="relation_builder")]
+
+    def _handle_placeholder_manager(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        context["fragment"] = self.placeholder_manager.update(context["fragment"])
+        return [Task(task_type="kb.merge.request", payload={}, source_agent="placeholder_manager")]
+
+    def _handle_knowledge_base(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        state = self.kb.merge(context["fragment"])
+        context["state"] = state
+        return [Task(task_type="insight.request", payload={}, source_agent="knowledge_base")]
+
+    def _handle_insight_generator(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        if task.task_type == "insight.request":
+            insights = self.insight_gen.generate(context["state"])
+            self.kb.append_insights(insights)
+            context["state"] = self.kb.state
+            return [Task(task_type="version.request", payload={}, source_agent="insight_generator")]
+
+        if task.task_type == "report.request":
+            report_text = self.insight_gen.generate_report_text(context["state"], context["state"].get("insights", []))
+            self.context.report_path.write_text(report_text, encoding="utf-8")
+            return [Task(task_type="visualize.request", payload={}, source_agent="insight_generator")]
+
+        return []
+
+    def _handle_version_manager(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        version_meta = self.version_mgr.create_snapshot(context["state"])
+        self.kb.add_version_record(version_meta)
+        context["state"] = self.kb.state
+        context["snapshot_path"] = version_meta["snapshot_path"]
+        return [Task(task_type="report.request", payload={}, source_agent="version_manager")]
+
+    def _handle_visualizer(self, task: Task, context: Dict[str, Any]) -> List[Task]:
+        context["visualizations"] = self.visualizer.visualize(context["state"])
+        return []
