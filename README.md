@@ -73,3 +73,11 @@ python3 main.py --workspace demo --input sample_data/raw_inputs.json
 - **改编排顺序**：编辑 `workflow/default_workflow.json`。
 - **替换单个 Agent**：在 `agent_runtime.py` 的 `_register_handlers()` 中替换对应 handler。
 - **扩展新任务**：新增 `task_type` 与 handler，并在 workflow 里加路由。
+
+
+## 关于冲突（重要）
+
+`output/workspaces/` 下的文件属于运行时产物（快照、trace、dashboard、graph 数据），会在每次运行后变化，
+现在已通过 `.gitignore` 忽略，默认**不提交到 Git**，以减少分支合并冲突。
+
+如需查看结果，请本地运行后直接打开对应 workspace 的 `dashboard.html`。

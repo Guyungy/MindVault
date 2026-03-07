@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local generated artifacts
+output/workspaces/
+artifacts/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
