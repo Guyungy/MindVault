@@ -39,20 +39,62 @@ class InsightGeneratorAgent:
         ]
 
     def generate_report_text(self, kb: Dict[str, Any], insights: List[Dict[str, Any]]) -> str:
+        entities = kb.get("entities", [])
+        events = kb.get("events", [])
+        relations = kb.get("relations", [])
+
         lines = ["# Self-Growing Knowledge Base Report", ""]
-        lines.append(f"- Entities: {len(kb.get('entities', []))}")
-        lines.append(f"- Events: {len(kb.get('events', []))}")
-        lines.append(f"- Relations: {len(kb.get('relations', []))}")
-        lines.append("")
+        lines.extend([
+            "## Overview",
+            "",
+            "| Metric | Count |",
+            "| --- | ---: |",
+            f"| Entities | {len(entities)} |",
+            f"| Events | {len(events)} |",
+            f"| Relations | {len(relations)} |",
+            "",
+        ])
+
+        type_counts = Counter(entity.get("type", "unknown") for entity in entities)
+        if type_counts:
+            lines.extend([
+                "## Entity Type Distribution",
+                "",
+                "| Type | Count |",
+                "| --- | ---: |",
+            ])
+            for entity_type, count in sorted(type_counts.items(), key=lambda item: (-item[1], item[0])):
+                lines.append(f"| {entity_type} | {count} |")
+            lines.append("")
+
         lines.append("## Insights")
-        for idx, insight in enumerate(insights, start=1):
-            lines.append(f"{idx}. **{insight['title']}**: {insight['summary']}")
+        if insights:
+            for idx, insight in enumerate(insights, start=1):
+                title = insight.get("title", f"Insight {idx}")
+                summary = insight.get("summary", "")
+                lines.append(f"{idx}. **{title}**")
+                if summary:
+                    lines.append(f"   - {summary}")
+        else:
+            lines.append("- No insights generated yet.")
         lines.append("")
+
         lines.append("## Placeholder Focus")
-        unresolved = []
-        for ent in kb.get("entities", []):
-            missing = [k for k, v in ent.get("placeholders", {}).items() if v == "missing"]
+        unresolved: List[tuple[str, str, List[str]]] = []
+        for ent in entities:
+            missing = sorted(k for k, v in ent.get("placeholders", {}).items() if v == "missing")
             if missing:
-                unresolved.append(f"- {ent['name']} ({ent['type']}): {', '.join(missing)}")
-        lines.extend(unresolved or ["- No unresolved placeholders."])
+                unresolved.append((ent.get("name", "Unknown"), ent.get("type", "unknown"), missing))
+
+        if unresolved:
+            lines.extend([
+                "",
+                "| Entity | Type | Missing Fields |",
+                "| --- | --- | --- |",
+            ])
+            for name, entity_type, missing in sorted(unresolved, key=lambda item: (-len(item[2]), item[0])):
+                lines.append(f"| {name} | {entity_type} | {', '.join(missing)} |")
+        else:
+            lines.append("- No unresolved placeholders.")
+
         return "\n".join(lines)
