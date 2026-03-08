@@ -31,6 +31,9 @@ class ModelRouter:
                 api_key_env=provider.get("api_key_env", "OPENAI_API_KEY"),
                 model=provider.get("model", "gpt-4o-mini"),
                 api_key=provider.get("api_key", ""),
+                timeout_seconds=int(provider.get("timeout_seconds", 120)),
+                max_retries=int(provider.get("max_retries", 2)),
+                retry_backoff_seconds=float(provider.get("retry_backoff_seconds", 1.0)),
             )
         )
 

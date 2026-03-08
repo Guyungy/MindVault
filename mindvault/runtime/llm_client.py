@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.request
-import urllib.error
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -16,6 +16,9 @@ class LLMProviderConfig:
     api_key_env: str
     model: str
     api_key: str = ""
+    timeout_seconds: int = 120
+    max_retries: int = 2
+    retry_backoff_seconds: float = 1.0
 
 
 class LLMClient:
@@ -24,7 +27,14 @@ class LLMClient:
     def __init__(self, config: LLMProviderConfig) -> None:
         self.config = config
 
-    def chat(self, prompt: str, system_prompt: str = "", temperature: float = 0.2, max_retries: int = 0) -> Dict[str, Any]:
+    def chat(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        temperature: float = 0.2,
+        max_retries: Optional[int] = None,
+        timeout_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
         api_key = self.config.api_key or os.getenv(self.config.api_key_env, "")
 
         messages = []
@@ -44,15 +54,18 @@ class LLMClient:
         if not url.endswith("/chat/completions"):
             url = url.rstrip("/") + "/chat/completions"
 
+        retries = self.config.max_retries if max_retries is None else max_retries
+        timeout = self.config.timeout_seconds if timeout_seconds is None else timeout_seconds
+
         last_error: Optional[Exception] = None
-        for attempt in range(max_retries + 1):
+        for attempt in range(retries + 1):
             try:
                 req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"))
                 req.add_header("Content-Type", "application/json")
                 if api_key:
                     req.add_header("Authorization", f"Bearer {api_key}")
 
-                with urllib.request.urlopen(req, timeout=120) as response:
+                with urllib.request.urlopen(req, timeout=timeout) as response:
                     result = json.loads(response.read().decode("utf-8"))
                     content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                     return {
@@ -63,6 +76,8 @@ class LLMClient:
                     }
             except Exception as e:
                 last_error = e
+                if attempt < retries and self.config.retry_backoff_seconds > 0:
+                    time.sleep(self.config.retry_backoff_seconds * (attempt + 1))
 
         # All retries exhausted — return fallback
         return {
