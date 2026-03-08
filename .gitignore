@@ -12,3 +12,6 @@ artifacts/
 .idea/
 *.json
 config/model_config.json
+test/test.md
+test.md
+test.md
