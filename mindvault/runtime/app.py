@@ -114,9 +114,6 @@ class VaultRuntime:
                 all_relations.extend(result.get("relation_candidates", []))
                 all_events.extend(result.get("event_candidates", []))
             else:
-                print(f"⚠️ Chunk {chunk.chunk_id} LLM Parse Fallback! Result keys:", result.keys() if isinstance(result, dict) else type(result))
-                if isinstance(result, dict) and "error" in result:
-                    print(f"   LLM Error: {result.get('error')}")
                 self.trace.log("parse_fallback", chunk_id=chunk.chunk_id, reason="no_structured_output")
 
         self.trace.log("parse_complete",

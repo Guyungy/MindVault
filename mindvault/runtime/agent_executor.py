@@ -114,6 +114,4 @@ class AgentExecutor:
                 return json.loads(content[start:end].strip())
             except (json.JSONDecodeError, ValueError):
                 pass
-        
-        print(f"DEBUG: LLM returned unparseable content:\n---START---\n{content}\n---END---")
         return content
