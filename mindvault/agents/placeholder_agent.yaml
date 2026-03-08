@@ -1,0 +1,20 @@
+name: placeholder_agent
+role: >
+  你是 MindVault 的占位符管理专家。识别知识库中实体缺失的重要字段，并尝试从现有 claims 中补全。
+
+input_artifacts:
+  - canonical_kb_state
+  - claims
+
+output_artifacts:
+  - placeholder_updates
+
+model_route: parse
+prompt_template: mindvault/prompts/placeholder_agent.md
+
+retry_policy:
+  max_retries: 1
+  fallback: scan_only
+
+chunk_strategy: single
+max_input_tokens: 4096

@@ -1,111 +1,90 @@
 [
   {
-    "agent": "IngestorAgent",
-    "step": "normalize_inputs",
-    "timestamp": "2026-03-07T04:32:05.039373",
-    "input_summary": {
-      "raw_items": 3
-    },
-    "output_summary": {
-      "normalized_docs": 3
-    }
+    "event": "agent_executed",
+    "agent": "ingestor",
+    "task_type": "ingest.start",
+    "emitted": [
+      "parse.request"
+    ],
+    "timestamp": "2026-03-07T11:37:51.621112"
   },
   {
-    "agent": "ParserAgent+SchemaDesignerAgent",
-    "step": "extract_objects",
-    "timestamp": "2026-03-07T04:32:05.043612",
-    "input_summary": {
-      "docs": 3
-    },
-    "output_summary": {
-      "entities": 6,
-      "events": 3,
-      "relations": 3,
-      "entity_types": [
-        "person",
-        "product",
-        "technician",
-        "venue"
-      ]
-    }
+    "event": "agent_executed",
+    "agent": "parser",
+    "task_type": "parse.request",
+    "emitted": [
+      "dedup.request"
+    ],
+    "timestamp": "2026-03-07T11:37:51.628177"
   },
   {
-    "agent": "DeduplicatorAgent",
-    "step": "merge_duplicates",
-    "timestamp": "2026-03-07T04:32:05.043642",
-    "input_summary": {},
-    "output_summary": {
-      "entities": 5
-    }
+    "event": "agent_executed",
+    "agent": "deduplicator",
+    "task_type": "dedup.request",
+    "emitted": [
+      "relation.request"
+    ],
+    "timestamp": "2026-03-07T11:37:51.628220"
   },
   {
-    "agent": "RelationBuilderAgent",
-    "step": "build_relations",
-    "timestamp": "2026-03-07T04:32:05.043661",
-    "input_summary": {},
-    "output_summary": {
-      "relations": 11
-    }
+    "event": "agent_executed",
+    "agent": "relation_builder",
+    "task_type": "relation.request",
+    "emitted": [
+      "placeholder.request"
+    ],
+    "timestamp": "2026-03-07T11:37:51.628260"
   },
   {
-    "agent": "PlaceholderManagerAgent",
-    "step": "update_placeholders",
-    "timestamp": "2026-03-07T04:32:05.043675",
-    "input_summary": {},
-    "output_summary": {
-      "missing_placeholders": 15
-    }
+    "event": "agent_executed",
+    "agent": "placeholder_manager",
+    "task_type": "placeholder.request",
+    "emitted": [
+      "kb.merge.request"
+    ],
+    "timestamp": "2026-03-07T11:37:52.616108"
   },
   {
-    "agent": "KnowledgeBase",
-    "step": "merge_fragment",
-    "timestamp": "2026-03-07T04:32:05.044835",
-    "input_summary": {},
-    "output_summary": {
-      "kb_entities": 5
-    }
+    "event": "agent_executed",
+    "agent": "knowledge_base",
+    "task_type": "kb.merge.request",
+    "emitted": [
+      "insight.request"
+    ],
+    "timestamp": "2026-03-07T11:37:55.681868"
   },
   {
-    "agent": "InsightGeneratorAgent",
-    "step": "generate_insights",
-    "timestamp": "2026-03-07T04:32:05.045496",
-    "input_summary": {},
-    "output_summary": {
-      "insights": 2
-    }
+    "event": "agent_executed",
+    "agent": "insight_generator",
+    "task_type": "insight.request",
+    "emitted": [
+      "version.request"
+    ],
+    "timestamp": "2026-03-07T11:37:55.684890"
   },
   {
-    "agent": "VersionManagerAgent",
-    "step": "create_snapshot",
-    "timestamp": "2026-03-07T04:32:05.047171",
-    "input_summary": {},
-    "output_summary": {
-      "snapshot_path": "output/workspaces/demo/snapshots/kb_snapshot_v2.json",
-      "version": 2,
-      "diff": {
-        "entities_added": 0,
-        "events_added": 0,
-        "relations_added": 0
-      }
-    }
+    "event": "agent_executed",
+    "agent": "version_manager",
+    "task_type": "version.request",
+    "emitted": [
+      "report.request"
+    ],
+    "timestamp": "2026-03-07T11:37:55.693735"
   },
   {
-    "agent": "InsightGeneratorAgent",
-    "step": "write_report",
-    "timestamp": "2026-03-07T04:32:05.047334",
-    "input_summary": {},
-    "output_summary": {
-      "report": "output/workspaces/demo/report.md"
-    }
+    "event": "agent_executed",
+    "agent": "insight_generator",
+    "task_type": "report.request",
+    "emitted": [
+      "visualize.request"
+    ],
+    "timestamp": "2026-03-07T11:37:55.694003"
   },
   {
-    "agent": "VisualizerAgent",
-    "step": "render_visuals",
-    "timestamp": "2026-03-07T04:32:05.047587",
-    "input_summary": {},
-    "output_summary": {
-      "graph": "output/workspaces/demo/visuals/visualization_fallback.json",
-      "distribution": ""
-    }
+    "event": "agent_executed",
+    "agent": "visualizer",
+    "task_type": "visualize.request",
+    "emitted": [],
+    "timestamp": "2026-03-07T11:37:55.695805"
   }
 ]

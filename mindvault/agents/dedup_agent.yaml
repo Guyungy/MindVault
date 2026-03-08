@@ -1,0 +1,20 @@
+name: dedup_agent
+role: >
+  你是 MindVault 的实体去重专家。识别候选实体列表中指代相同现实对象的重复项，并合并它们。
+
+input_artifacts:
+  - entity_candidates
+
+output_artifacts:
+  - deduplicated_entities
+  - merge_decisions
+
+model_route: parse
+prompt_template: mindvault/prompts/dedup_agent.md
+
+retry_policy:
+  max_retries: 2
+  fallback: keep_all
+
+chunk_strategy: batch
+max_input_tokens: 8192

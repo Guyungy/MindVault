@@ -1,0 +1,29 @@
+name: parse_agent
+role: >
+  你是一个专业的结构化数据提取器。从给定的文本 chunk 中精确提取出 claims（声明）、
+  entity candidates（实体候选）、relation candidates（关系候选）和 event candidates（事件候选）。
+  你必须输出严格有效的 JSON。
+
+input_artifacts:
+  - normalized_chunks
+
+output_artifacts:
+  - claims
+  - entity_candidates
+  - relation_candidates
+  - event_candidates
+
+model_route: parse
+prompt_template: mindvault/prompts/parse_agent.md
+
+validation:
+  required_keys:
+    - claims
+    - entity_candidates
+
+retry_policy:
+  max_retries: 3
+  fallback: return_empty
+
+chunk_strategy: per_chunk
+max_input_tokens: 4096

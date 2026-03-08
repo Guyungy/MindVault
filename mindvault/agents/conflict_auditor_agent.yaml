@@ -1,0 +1,20 @@
+name: conflict_auditor_agent
+role: >
+  你是 MindVault 的冲突审计专家。检测知识库中存在的矛盾信息，并提出解决建议。
+
+input_artifacts:
+  - canonical_kb_state
+  - claims
+
+output_artifacts:
+  - conflict_report
+
+model_route: insight
+prompt_template: mindvault/prompts/conflict_auditor.md
+
+retry_policy:
+  max_retries: 1
+  fallback: rule_based_fallback
+
+chunk_strategy: single
+max_input_tokens: 8192

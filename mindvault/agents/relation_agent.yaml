@@ -1,0 +1,20 @@
+name: relation_agent
+role: >
+  你是 MindVault 的关系推理专家。基于已识别的实体和原文上下文，推断实体之间的语义关系。
+
+input_artifacts:
+  - entity_candidates
+  - claims
+
+output_artifacts:
+  - relation_candidates
+
+model_route: parse
+prompt_template: mindvault/prompts/relation_agent.md
+
+retry_policy:
+  max_retries: 2
+  fallback: return_empty
+
+chunk_strategy: batch
+max_input_tokens: 8192

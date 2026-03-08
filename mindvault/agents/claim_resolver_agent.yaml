@@ -1,0 +1,19 @@
+name: claim_resolver_agent
+role: >
+  你是 MindVault 的声明分类与置信度评估专家。对每个 claim 判定其类型并给出置信度评分。
+
+input_artifacts:
+  - claims
+
+output_artifacts:
+  - resolved_claims
+
+model_route: parse
+prompt_template: mindvault/prompts/claim_resolver.md
+
+retry_policy:
+  max_retries: 2
+  fallback: pass_through
+
+chunk_strategy: batch
+max_input_tokens: 8192

@@ -1,0 +1,45 @@
+DEBUG: LLM returned unparseable content:
+---START---
+[llm-fallback] HTTP Error 502: Bad Gateway
+---END---
+⚠️ Chunk test.md_chunk_0000 LLM Parse Fallback! Result keys: dict_keys(['raw_content'])
+DEBUG: LLM returned unparseable content:
+---START---
+[llm-fallback] HTTP Error 502: Bad Gateway
+---END---
+⚠️ Chunk test.md_chunk_0001 LLM Parse Fallback! Result keys: dict_keys(['raw_content'])
+DEBUG: LLM returned unparseable content:
+---START---
+[llm-fallback] HTTP Error 502: Bad Gateway
+---END---
+⚠️ Chunk test.md_chunk_0002 LLM Parse Fallback! Result keys: dict_keys(['raw_content'])
+DEBUG: LLM returned unparseable content:
+---START---
+[llm-fallback] HTTP Error 502: Bad Gateway
+---END---
+⚠️ Chunk test.md_chunk_0003 LLM Parse Fallback! Result keys: dict_keys(['raw_content'])
+DEBUG: LLM returned unparseable content:
+---START---
+[llm-fallback] HTTP Error 502: Bad Gateway
+---END---
+⚠️ Chunk test.md_chunk_0004 LLM Parse Fallback! Result keys: dict_keys(['raw_content'])
+✅ Pipeline 完成
+{
+  "workspace": "v2_final",
+  "knowledge_base": "output/workspaces/v2_final/canonical/knowledge_base.json",
+  "snapshot": "output/workspaces/v2_final/snapshots/kb_snapshot_v1.json",
+  "changelog": "output/workspaces/v2_final/snapshots/changelog_v1.json",
+  "report": "output/workspaces/v2_final/reports/report.md",
+  "dashboard": "output/workspaces/v2_final/visuals/dashboard.html",
+  "trace": "output/workspaces/v2_final/agent_trace.json",
+  "stats": {
+    "sources": 1,
+    "chunks": 5,
+    "claims": 0,
+    "entities": 0,
+    "relations": 0,
+    "events": 0,
+    "conflicts": 0,
+    "placeholders_missing": 0
+  }
+}

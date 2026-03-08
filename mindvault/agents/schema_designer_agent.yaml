@@ -1,0 +1,20 @@
+name: schema_designer_agent
+role: >
+  你是 MindVault 的 Schema 设计专家。基于新提取的实体和关系，提议合理的 schema 变更。
+
+input_artifacts:
+  - entity_candidates
+  - relation_candidates
+
+output_artifacts:
+  - schema_proposals
+
+model_route: parse
+prompt_template: mindvault/prompts/schema_designer.md
+
+retry_policy:
+  max_retries: 2
+  fallback: skip
+
+chunk_strategy: batch
+max_input_tokens: 4096

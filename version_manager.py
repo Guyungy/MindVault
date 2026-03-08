@@ -55,7 +55,11 @@ class VersionManagerAgent:
 
         relations_added = self._diff_list(prev_kb.get("relations", []), current_kb.get("relations", []))
         claims_added = self._diff_list(prev_kb.get("claims", []), current_kb.get("claims", []))
-        placeholders_prev = {f"{p.get('target_id')}::{p.get('field')}::{p.get('status')}" for p in prev_kb.get("placeholders", [])}
+        placeholders_raw = prev_kb.get("placeholders", [])
+        if isinstance(placeholders_raw, dict):
+            placeholders_prev = {f"{target_id}::{field}::{status}" for target_id, fields in placeholders_raw.items() for field, status in fields.items()}
+        else:
+            placeholders_prev = {f"{p.get('target_id')}::{p.get('field')}::{p.get('status')}" for p in placeholders_raw}
         placeholders_curr = current_kb.get("placeholders", [])
         placeholders_filled = [p for p in placeholders_curr if p.get("status") == "filled" and f"{p.get('target_id')}::{p.get('field')}::filled" not in placeholders_prev]
 

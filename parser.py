@@ -75,6 +75,11 @@ class ParserAgent:
         (r"venue\s+([A-Z][A-Za-z0-9\-\s]+)", "venue"),
         (r"product\s+([A-Z][A-Za-z0-9\-\s]+)", "product"),
         (r"team\s+member\s+([A-Z][a-z]+)", "person"),
+        (r"\b(\d{3,5})\b", "technician"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+水[汇疗])", "venue"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+会所)", "venue"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+公寓)", "venue"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+酒店)", "venue"),
     ]
 
     def __init__(self) -> None:
