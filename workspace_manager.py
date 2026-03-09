@@ -20,6 +20,7 @@ class WorkspaceContext:
     visualization_dir: Path
     governance_dir: Path
     config_dir: Path
+    wiki_dir: Path
     kb_path: Path
     report_path: Path
 
@@ -42,8 +43,9 @@ class WorkspaceManager:
         visuals = root / "visuals"
         governance = root / "governance"
         config = root / "config"
+        wiki = root / "wiki"
 
-        for path in [root, raw_dir, extracted_dir, canonical_dir, snapshots, reports, visuals, governance, config]:
+        for path in [root, raw_dir, extracted_dir, canonical_dir, snapshots, reports, visuals, governance, config, wiki]:
             path.mkdir(parents=True, exist_ok=True)
 
         return WorkspaceContext(
@@ -57,6 +59,7 @@ class WorkspaceManager:
             visualization_dir=visuals,
             governance_dir=governance,
             config_dir=config,
+            wiki_dir=wiki,
             kb_path=canonical_dir / "knowledge_base.json",
             report_path=reports / "report.md",
         )

@@ -4,6 +4,8 @@ import shutil
 import unittest
 
 from main import run_pipeline
+from mindvault.runtime.app import load_sources_from_path
+from mindvault.runtime.renderers.wiki import WikiExporter
 
 
 class MindVaultV02Tests(unittest.TestCase):
@@ -35,6 +37,63 @@ class MindVaultV02Tests(unittest.TestCase):
         conflicts = json.loads((self.workspace_path / "governance" / "conflicts.json").read_text(encoding="utf-8"))
         fields = {c.get("field") for c in conflicts.get("conflicts", [])}
         self.assertIn("price", fields)
+
+    def test_wiki_exporter_outputs_wiki_and_tables(self):
+        out_dir = self.workspace_path / "wiki"
+        exporter = WikiExporter(out_dir)
+        result = exporter.export(
+            state={
+                "entities": [
+                    {
+                        "id": "ent_venue_blue_harbor",
+                        "type": "venue",
+                        "name": "Blue Harbor",
+                        "attributes": {"location": "demo", "rating": 4.5},
+                        "confidence": 0.9,
+                        "updated_at": "2026-03-09T00:00:00",
+                        "source_refs": ["demo_doc"],
+                    }
+                ],
+                "claims": [
+                    {
+                        "id": "claim_1",
+                        "subject": "ent_venue_blue_harbor",
+                        "predicate": "rating",
+                        "object": 4.5,
+                        "claim_type": "fact",
+                        "confidence": 0.8,
+                    }
+                ],
+                "relations": [],
+                "events": [],
+                "placeholders": [],
+            },
+            governance={"conflicts": {"conflicts": [], "unresolved_count": 0}, "placeholders": []},
+            version_meta={"version": 1},
+        )
+        wiki_index = out_dir / "index.md"
+        tables_json = out_dir / "tables.json"
+        self.assertTrue(wiki_index.exists())
+        self.assertTrue(tables_json.exists())
+        self.assertIn("index", result)
+
+    def test_directory_loader_supports_md_txt_json(self):
+        input_dir = self.workspace_path / "inputs"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        (input_dir / "a.md").write_text("# Title\n\nalpha", encoding="utf-8")
+        (input_dir / "b.txt").write_text("beta", encoding="utf-8")
+        (input_dir / "c.json").write_text(json.dumps([
+            {"source_id": "json_one", "source_type": "doc", "content": "gamma"}
+        ], ensure_ascii=False), encoding="utf-8")
+        (input_dir / "ignored.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+
+        sources = load_sources_from_path(input_dir)
+        source_ids = {item["source_id"] for item in sources}
+
+        self.assertEqual(len(sources), 3)
+        self.assertIn("a.md", source_ids)
+        self.assertIn("b.txt", source_ids)
+        self.assertIn("json_one", source_ids)
 
 
 if __name__ == "__main__":

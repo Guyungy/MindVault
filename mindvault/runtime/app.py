@@ -21,6 +21,7 @@ from mindvault.governance.conflict_engine import ConflictEngine
 from mindvault.governance.placeholder_engine import PlaceholderEngine
 from mindvault.governance.schema_evolution import SchemaEvolutionEngine
 from mindvault.governance.memory_curator import MemoryCurator
+from mindvault.runtime.renderers.wiki import WikiExporter
 
 
 class VaultRuntime:
@@ -192,6 +193,10 @@ class VaultRuntime:
         dashboard_path = self._render_dashboard(state, governance, version_meta)
         self.trace.log("dashboard_complete")
 
+        # ── Step 14: Wiki export ────────────────────────────────────────────
+        wiki_paths = self._export_wiki(state, governance, version_meta)
+        self.trace.log("wiki_export_complete", index=wiki_paths.get("index", ""))
+
         # ── Save trace ───────────────────────────────────────────────────────
         self.trace.save(self.ctx.root_dir / "agent_trace.json")
 
@@ -202,6 +207,7 @@ class VaultRuntime:
             "changelog": version_meta.get("changelog_path", ""),
             "report": str(self.ctx.report_path),
             "dashboard": dashboard_path,
+            "wiki": wiki_paths,
             "trace": str(self.ctx.root_dir / "agent_trace.json"),
             "stats": {
                 "sources": len(sources),
@@ -304,6 +310,10 @@ class VaultRuntime:
         renderer = DashboardRenderer(str(self.ctx.visualization_dir))
         return renderer.render(state, governance, self.trace.entries, version_meta)
 
+    def _export_wiki(self, state, governance, version_meta) -> Dict[str, Any]:
+        exporter = WikiExporter(self.ctx.wiki_dir)
+        return exporter.export(state, governance, version_meta)
+
     @staticmethod
     def _append_json(path: Path, items: List[Dict[str, Any]]) -> None:
         existing = []
@@ -321,7 +331,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="MindVault v2 — AI-first 知识操作系统")
     parser.add_argument("--workspace", "-w", default="default", help="工作区名称")
-    parser.add_argument("--input", "-i", required=True, help="输入文件路径 (JSON 数组或 Markdown)")
+    parser.add_argument("--input", "-i", required=True, help="输入文件或目录路径，支持 .md/.json/.txt")
     parser.add_argument("--config", "-c", default="mindvault/config", help="配置目录路径")
     parser.add_argument("--verbose", "-v", action="store_true", help="显示流水线细颗粒度进度信息")
     args = parser.parse_args()
@@ -331,32 +341,63 @@ def main():
         print(f"❌ 文件不存在: {args.input}")
         sys.exit(1)
 
-    # Support both JSON array and raw markdown/text
-    if input_path.suffix == ".json":
-        raw = json.loads(input_path.read_text(encoding="utf-8"))
-        sources = []
-        for item in raw:
-            sources.append({
-                "source_id": item.get("source", item.get("source_id", input_path.stem)),
-                "source_type": item.get("source_type", "doc"),
-                "content": item.get("text", item.get("content", "")),
-                "metadata": item.get("metadata", {}),
-            })
-    else:
-        # Raw file: treat as single document source
-        content = input_path.read_text(encoding="utf-8")
-        sources = [{
-            "source_id": input_path.name,
-            "source_type": "doc",
-            "content": content,
-            "metadata": {"filename": input_path.name},
-        }]
+    sources = load_sources_from_path(input_path)
+    if not sources:
+        print(f"❌ 未找到可处理文件: {args.input}")
+        sys.exit(1)
 
     runtime = VaultRuntime(args.workspace, config_root=args.config, verbose=args.verbose)
     result = runtime.ingest(sources)
 
     print("✅ Pipeline 完成")
     print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def load_sources_from_path(input_path: Path) -> List[Dict[str, Any]]:
+    """Load one file or all supported files from a directory."""
+    path = Path(input_path)
+    if path.is_dir():
+        sources: List[Dict[str, Any]] = []
+        for child in sorted(path.rglob("*")):
+            if child.is_file() and child.suffix.lower() in {".md", ".txt", ".json"}:
+                sources.extend(_load_single_input_file(child))
+        return sources
+
+    return _load_single_input_file(path)
+
+
+def _load_single_input_file(path: Path) -> List[Dict[str, Any]]:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            return [_normalize_json_source(item, path) for item in raw]
+        if isinstance(raw, dict):
+            return [_normalize_json_source(raw, path)]
+        raise ValueError(f"Unsupported JSON root in {path}: expected object or array.")
+
+    content = path.read_text(encoding="utf-8")
+    return [{
+        "source_id": path.name,
+        "source_type": "doc",
+        "content": content,
+        "metadata": {"filename": path.name, "relative_path": str(path)},
+    }]
+
+
+def _normalize_json_source(item: Dict[str, Any], path: Path) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError(f"Unsupported JSON item in {path}: expected object.")
+    return {
+        "source_id": item.get("source", item.get("source_id", path.stem)),
+        "source_type": item.get("source_type", "doc"),
+        "content": item.get("text", item.get("content", "")),
+        "metadata": {
+            **item.get("metadata", {}),
+            "filename": path.name,
+            "relative_path": str(path),
+        },
+    }
 
 
 if __name__ == "__main__":

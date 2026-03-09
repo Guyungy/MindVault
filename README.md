@@ -106,15 +106,35 @@ export OPENAI_API_KEY=your_key
 ### 4.4 运行主流水线
 
 ```bash
-python3 main.py --workspace demo --input sample_data/raw_inputs.json
+python3 -m mindvault.runtime.app -w demo -i sample_data/benchmarks/semi_structured.json
 ```
 
 参数说明：
 - `--workspace`：工作区 ID（隔离多次实验与状态）。
-- `--input`：输入文件路径。
-- `--workflow`：工作流配置路径，默认 `workflow/default_workflow.json`。
+- `--input`：输入文件或目录路径，支持 `.md`、`.txt`、`.json`。
+- `--config`：配置目录路径，默认 `mindvault/config`。
 
-运行成功后，终端会打印各产物路径（knowledge_base、report、dashboard 等）。
+运行成功后，终端会打印各产物路径（knowledge_base、report、dashboard、wiki 等）。
+
+### 4.5 批量处理一个文件夹
+
+系统现在支持直接输入一个目录，自动递归处理其中所有 `.md`、`.txt`、`.json` 文件。
+
+```bash
+python3 -m mindvault.runtime.app -w demo -i /Users/a1/Documents/GitHub/MindVault/data
+```
+
+例如处理当前项目内的某个资料目录：
+
+```bash
+python3 -m mindvault.runtime.app -w demo -i /Users/a1/Documents/GitHub/MindVault/sample_data
+```
+
+目录模式下的行为：
+- 递归扫描子目录。
+- 只读取 `.md`、`.txt`、`.json` 文件。
+- `.json` 支持单个对象或对象数组。
+- 其他文件类型会被自动忽略。
 
 ---
 
@@ -126,11 +146,18 @@ python3 main.py --workspace demo --input sample_data/raw_inputs.json
 - 半结构化文本
 - 噪声聊天记录
 - 多来源冲突数据
+- 目录形式的批量资料集
 
 推荐先用 benchmark 文件验证：
 - `sample_data/benchmarks/semi_structured.json`
 - `sample_data/benchmarks/noisy_chat.json`
 - `sample_data/benchmarks/conflicting_multi_source.json`
+
+也可以直接传入目录：
+
+```bash
+python3 -m mindvault.runtime.app -w demo -i sample_data/benchmarks
+```
 
 ### 5.2 输出（重点文件）
 
@@ -151,6 +178,9 @@ python3 main.py --workspace demo --input sample_data/raw_inputs.json
   - `reports/report.md`
   - `visuals/dashboard.html`
   - `visuals/graph_data.json`
+  - `wiki/index.md`
+  - `wiki/governance.md`
+  - `wiki/tables.json`
 
 ---
 
@@ -186,9 +216,14 @@ python3 -m unittest discover -s tests -v
 ## 8. 常见问题（FAQ）
 
 ### Q1：为什么没有生成报告？
-- 先检查 `main.py` 终端输出路径。
+- 先检查 `python3 -m mindvault.runtime.app ...` 的终端输出路径。
 - 确认 `output/workspaces/<workspace>/reports/report.md` 是否存在。
 - 若 pipeline 中断，优先查看 `agent_trace.json` 与测试输出。
+
+### Q6：如何一次处理整个文件夹？
+- 直接把目录传给 `-i`。
+- 例如：`python3 -m mindvault.runtime.app -w demo -i sample_data/benchmarks`
+- 系统会递归读取其中的 `.md`、`.txt`、`.json` 文件。
 
 ### Q2：如何避免不同实验相互污染？
 - 始终使用不同 `--workspace`（例如 `demo_v1`, `demo_v2`）。
@@ -233,4 +268,3 @@ python3 -m unittest discover -s tests -v
 - 配置管理与密钥治理（Secrets）
 - 观测系统（日志、指标、告警）
 - 数据合规与访问控制策略
-
