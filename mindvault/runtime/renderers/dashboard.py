@@ -58,14 +58,13 @@ class DashboardRenderer:
         missing_ph = sum(1 for p in (placeholders if isinstance(placeholders, list) else []) if p.get("status") == "missing")
 
         # Build tables
-        entity_tbl = self._table(entities[:50], ["id", "type", "name", "confidence", "source_refs"])
-        claim_tbl = self._table(claims[:50], ["id", "subject", "predicate", "object", "claim_type", "confidence"])
-        conflict_tbl = self._table(conflicts.get("conflicts", [])[:30], ["entity_id", "field", "selected_value", "resolution_status"])
+        entity_tbl = self._table(entities[:50])
+        claim_tbl = self._table(claims[:50])
+        conflict_tbl = self._table(conflicts.get("conflicts", [])[:30])
         ph_tbl = self._table(
-            [p for p in (placeholders if isinstance(placeholders, list) else []) if p.get("status") == "missing"][:40],
-            ["target_id", "field", "status", "fill_confidence"]
+            [p for p in (placeholders if isinstance(placeholders, list) else []) if p.get("status") == "missing"][:40]
         )
-        trace_tbl = self._table(trace[:30], ["event", "agent", "task_type", "timestamp"])
+        trace_tbl = self._table(trace[:30])
 
         return f"""<!doctype html>
 <html lang='zh'>
@@ -93,11 +92,12 @@ class DashboardRenderer:
     .kpi-card .value.red {{ color: var(--red); }}
     .kpi-card .value.yellow {{ color: var(--yellow); }}
     .kpi-card .value.purple {{ color: var(--purple); }}
-    table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px; }}
-    th {{ background: var(--card); color: var(--accent); padding: 10px 8px; text-align: left; border-bottom: 2px solid var(--border); }}
-    td {{ padding: 8px; border-bottom: 1px solid #292e42; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-    tr:hover td {{ background: #292e42; }}
-    code {{ font-size: 12px; color: var(--yellow); }}
+    table {{ width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 14px; background: var(--card); border-radius: 8px; overflow: hidden; }}
+    th {{ background: #1a1b26; color: var(--accent); padding: 14px 12px; text-align: left; border-bottom: 2px solid var(--border); font-weight: 600; text-transform: uppercase; font-size: 12px; letter-spacing: 0.5px; }}
+    td {{ padding: 12px; border-bottom: 1px solid #292e42; max-width: 400px; color: #a9b1d6; line-height: 1.5; vertical-align: top; word-wrap: break-word; }}
+    tr:last-child td {{ border-bottom: none; }}
+    tr:hover td {{ background: #2f354d; }}
+    td strong {{ color: var(--purple); font-size: 13px; }}
     .version {{ color: #565f89; font-size: 13px; margin-top: 4px; }}
   </style>
 </head>
@@ -158,16 +158,33 @@ class DashboardRenderer:
 </html>"""
 
     @staticmethod
-    def _table(rows: List[Dict[str, Any]], columns: List[str]) -> str:
-        head = "".join(f"<th>{escape(c)}</th>" for c in columns)
+    def _table(rows: List[Dict[str, Any]], columns: List[str] = None) -> str:
+        if not rows:
+            cols = columns or []
+            head = "<th>#</th>" + "".join(f"<th>{escape(c.upper())}</th>" for c in cols)
+            return f"<table><thead><tr>{head}</tr></thead><tbody><tr><td colspan='{len(cols)+1}' style='color:#565f89; text-align: center; padding: 20px;'>No data available</td></tr></tbody></table>"
+        
+        if not columns:
+            # Dynamically extract columns from rows
+            col_set = set()
+            columns = []
+            for row in rows:
+                for k in row.keys():
+                    if k not in col_set:
+                        col_set.add(k)
+                        columns.append(k)
+                        
+        # Generate headers with a # column first
+        head = "<th>#</th>" + "".join(f"<th>{escape(c.upper())}</th>" for c in columns)
         body_parts = []
-        for row in rows:
-            cells = []
+        for i, row in enumerate(rows, 1):
+            cells = [f"<td><strong>{i}</strong></td>"]
             for c in columns:
                 val = row.get(c, "")
                 if isinstance(val, (dict, list)):
                     val = json.dumps(val, ensure_ascii=False)
-                cells.append(f"<td><code>{escape(str(val)[:120])}</code></td>")
+                # Remove code tags and let text wrap for readability
+                cells.append(f"<td>{escape(str(val)[:200])}</td>")
             body_parts.append(f"<tr>{''.join(cells)}</tr>")
-        body = "".join(body_parts) or f"<tr><td colspan='{len(columns)}' style='color:#565f89'>No data</td></tr>"
+        body = "".join(body_parts)
         return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"

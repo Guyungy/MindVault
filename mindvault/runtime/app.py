@@ -267,6 +267,22 @@ class VaultRuntime:
         ]
 
     def _generate_report(self, state, insights, governance) -> str:
+        report_agent_path = Path("mindvault/agents/report_agent.yaml")
+        if report_agent_path.exists():
+            context = {
+                "entities": state.get("entities", []),
+                "claims": state.get("claims", []),
+                "relations": state.get("relations", [])
+            }
+            result = self.executor.execute(report_agent_path, context)
+            if isinstance(result, dict) and result.get("content"):
+                return result["content"]
+            elif isinstance(result, dict) and result.get("raw_content"):
+                return result["raw_content"]
+            elif isinstance(result, str):
+                return result
+
+        # Fallback to simple template
         lines = ["# MindVault 知识库报告", ""]
         lines.append(f"- 实体 (Entities): {len(state.get('entities', []))}")
         lines.append(f"- 事件 (Events): {len(state.get('events', []))}")
