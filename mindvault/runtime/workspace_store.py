@@ -63,7 +63,7 @@ class WorkspaceStore:
             governance_dir=dirs["governance"],
             config_dir=dirs["config"],
             kb_path=dirs["canonical"] / "knowledge_base.json",
-            report_path=dirs["reports"] / "report.md",
+            report_path=dirs["reports"] / "report.json",
         )
 
     def list_workspaces(self) -> Dict[str, str]:

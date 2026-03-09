@@ -32,10 +32,10 @@ class VaultRuntime:
       → merge canonical → version snapshot → insight → report → dashboard
     """
 
-    def __init__(self, workspace_id: str, config_root: str = "mindvault/config") -> None:
+    def __init__(self, workspace_id: str, config_root: str = "mindvault/config", verbose: bool = False) -> None:
         self.workspace_store = WorkspaceStore()
         self.ctx: WorkspaceContext = self.workspace_store.resolve(workspace_id)
-        self.trace = TraceLogger()
+        self.trace = TraceLogger(verbose=verbose)
 
         # Runtime components
         config_root_path = Path(config_root)
@@ -184,8 +184,8 @@ class VaultRuntime:
         self.trace.log("insight_complete", count=len(insights))
 
         # ── Step 12: Report ──────────────────────────────────────────────────
-        report_text = self._generate_report(state, insights, governance)
-        self.ctx.report_path.write_text(report_text, encoding="utf-8")
+        report_data = self._generate_report(state, insights, governance)
+        self.ctx.report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
         self.trace.log("report_complete")
 
         # ── Step 13: Dashboard ───────────────────────────────────────────────
@@ -266,7 +266,7 @@ class VaultRuntime:
             },
         ]
 
-    def _generate_report(self, state, insights, governance) -> str:
+    def _generate_report(self, state, insights, governance) -> Dict[str, Any]:
         report_agent_path = Path("mindvault/agents/report_agent.yaml")
         if report_agent_path.exists():
             context = {
@@ -275,37 +275,29 @@ class VaultRuntime:
                 "relations": state.get("relations", [])
             }
             result = self.executor.execute(report_agent_path, context)
-            if isinstance(result, dict) and result.get("content"):
-                return result["content"]
-            elif isinstance(result, dict) and result.get("raw_content"):
-                return result["raw_content"]
-            elif isinstance(result, str):
+            if isinstance(result, dict) and "business_domain" in result:
                 return result
+            elif isinstance(result, dict) and result.get("content") and isinstance(result["content"], dict):
+                return result["content"]
 
-        # Fallback to simple template
-        lines = ["# MindVault 知识库报告", ""]
-        lines.append(f"- 实体 (Entities): {len(state.get('entities', []))}")
-        lines.append(f"- 事件 (Events): {len(state.get('events', []))}")
-        lines.append(f"- 关系 (Relations): {len(state.get('relations', []))}")
-        lines.append(f"- 声明 (Claims): {len(state.get('claims', []))}")
-        lines.append("")
-        lines.append("## 洞察")
-        for idx, insight in enumerate(insights, 1):
-            lines.append(f"{idx}. **{insight['title']}**: {insight['summary']}")
-        lines.append("")
-        lines.append("## 治理状态")
-        conflicts = governance.get("conflicts", {})
-        lines.append(f"- 未解决冲突: {conflicts.get('unresolved_count', 0)}")
-        missing = sum(1 for p in state.get("placeholders", []) if isinstance(p, dict) and p.get("status") == "missing")
-        lines.append(f"- 缺失字段占位: {missing}")
-        lines.append("")
-        lines.append("## 待补充实体")
-        for ent in state.get("entities", [])[:20]:
-            ph = ent.get("placeholders", {})
-            missing_fields = [k for k, v in ph.items() if v == "missing"]
-            if missing_fields:
-                lines.append(f"- {ent.get('name', ent.get('id', '?'))} ({ent.get('type', '?')}): {', '.join(missing_fields)}")
-        return "\n".join(lines)
+        # Fallback to simple dictionary
+        return {
+            "business_domain": "System Fallback Overview",
+            "summary": "Report generation failed or returned unparseable text.",
+            "tags": ["fallback", "system", "auto-generated"],
+            "tables": [
+                {
+                    "table_name": "Knowledge Elements",
+                    "columns": ["Type", "Count"],
+                    "rows": [
+                        {"Type": "Entities", "Count": len(state.get('entities', []))},
+                        {"Type": "Events", "Count": len(state.get('events', []))},
+                        {"Type": "Relations", "Count": len(state.get('relations', []))},
+                        {"Type": "Claims", "Count": len(state.get('claims', []))}
+                    ]
+                }
+            ]
+        }
 
     def _render_dashboard(self, state, governance, version_meta) -> str:
         from mindvault.runtime.renderers.dashboard import DashboardRenderer
@@ -331,6 +323,7 @@ def main():
     parser.add_argument("--workspace", "-w", default="default", help="工作区名称")
     parser.add_argument("--input", "-i", required=True, help="输入文件路径 (JSON 数组或 Markdown)")
     parser.add_argument("--config", "-c", default="mindvault/config", help="配置目录路径")
+    parser.add_argument("--verbose", "-v", action="store_true", help="显示流水线细颗粒度进度信息")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -359,7 +352,7 @@ def main():
             "metadata": {"filename": input_path.name},
         }]
 
-    runtime = VaultRuntime(args.workspace, config_root=args.config)
+    runtime = VaultRuntime(args.workspace, config_root=args.config, verbose=args.verbose)
     result = runtime.ingest(sources)
 
     print("✅ Pipeline 完成")

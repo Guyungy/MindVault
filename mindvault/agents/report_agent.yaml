@@ -8,7 +8,7 @@ input_artifacts:
   - governance_summary
 
 output_artifacts:
-  - report_markdown
+  - report_json
 
 model_route: report
 prompt_template: mindvault/prompts/report_agent.md
