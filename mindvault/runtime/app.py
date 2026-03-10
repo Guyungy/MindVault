@@ -22,6 +22,7 @@ from mindvault.governance.placeholder_engine import PlaceholderEngine
 from mindvault.governance.schema_evolution import SchemaEvolutionEngine
 from mindvault.governance.memory_curator import MemoryCurator
 from mindvault.runtime.renderers.wiki import WikiExporter
+from parser import ParserAgent as RuleParserAgent
 
 
 class VaultRuntime:
@@ -61,7 +62,8 @@ class VaultRuntime:
             taxonomy_path=self.ctx.canonical_dir / "taxonomy.json",
             policy_path=str(config_root_path / "schema_policy.json"),
         )
-        self.memory_curator = MemoryCurator()
+        self.memory_curator = MemoryCurator(min_confidence=0.3)
+        self.rule_parser = RuleParserAgent()
 
         # Adapters registry
         self._adapters = {
@@ -110,12 +112,24 @@ class VaultRuntime:
             result = self.executor.execute(parse_agent_path, context)
 
             if isinstance(result, dict) and "claims" in result:
-                all_claims.extend(result.get("claims", []))
-                all_entities.extend(result.get("entity_candidates", []))
-                all_relations.extend(result.get("relation_candidates", []))
-                all_events.extend(result.get("event_candidates", []))
+                normalized = self._normalize_parse_result(result, chunk)
+                all_claims.extend(normalized.get("claims", []))
+                all_entities.extend(normalized.get("entity_candidates", []))
+                all_relations.extend(normalized.get("relation_candidates", []))
+                all_events.extend(normalized.get("event_candidates", []))
             else:
-                self.trace.log("parse_fallback", chunk_id=chunk.chunk_id, reason="no_structured_output")
+                fallback = self._fallback_parse_chunk(chunk)
+                all_claims.extend(fallback.get("claims", []))
+                all_entities.extend(fallback.get("entity_candidates", []))
+                all_relations.extend(fallback.get("relation_candidates", []))
+                all_events.extend(fallback.get("event_candidates", []))
+                self.trace.log(
+                    "parse_fallback",
+                    chunk_id=chunk.chunk_id,
+                    reason="no_structured_output",
+                    fallback_claims=len(fallback.get("claims", [])),
+                    fallback_entities=len(fallback.get("entity_candidates", [])),
+                )
 
         self.trace.log("parse_complete",
                        claims=len(all_claims), entities=len(all_entities),
@@ -312,7 +326,90 @@ class VaultRuntime:
 
     def _export_wiki(self, state, governance, version_meta) -> Dict[str, Any]:
         exporter = WikiExporter(self.ctx.wiki_dir)
-        return exporter.export(state, governance, version_meta)
+        wiki_payload = self._generate_wiki_payload(state, governance, version_meta)
+        return exporter.export(state, governance, version_meta, wiki_payload=wiki_payload)
+
+    def _generate_wiki_payload(self, state, governance, version_meta) -> Dict[str, Any] | None:
+        wiki_agent_path = Path("mindvault/agents/wiki_builder_agent.yaml")
+        if not wiki_agent_path.exists():
+            return None
+
+        context = {
+            "entities": state.get("entities", []),
+            "claims": state.get("claims", []),
+            "relations": state.get("relations", []),
+            "events": state.get("events", []),
+            "governance": governance,
+            "version_meta": version_meta,
+        }
+        result = self.executor.execute(wiki_agent_path, context)
+        if isinstance(result, dict) and isinstance(result.get("pages"), list):
+            return result
+        return None
+
+    def _fallback_parse_chunk(self, chunk) -> Dict[str, Any]:
+        docs = [{
+            "text": chunk.text,
+            "source": chunk.source_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "speaker": chunk.context_hints.get("author", "unknown"),
+        }]
+        result = self.rule_parser.parse(docs, workspace_id=self.ctx.workspace_id)
+        return self._normalize_parse_result(result, chunk)
+
+    def _normalize_parse_result(self, result: Dict[str, Any], chunk) -> Dict[str, Any]:
+        source_id = chunk.source_id
+        claims = []
+        for claim in result.get("claims", []):
+            normalized_claim = dict(claim)
+            if "claim_id" in normalized_claim and "id" not in normalized_claim:
+                normalized_claim["id"] = normalized_claim["claim_id"]
+            normalized_claim.setdefault("source_ref", source_id)
+            normalized_claim.setdefault("source_refs", [normalized_claim.get("source_ref", source_id)])
+            normalized_claim.setdefault("status", "active")
+            claims.append(normalized_claim)
+
+        entities = []
+        for entity in result.get("entity_candidates", []):
+            normalized_entity = dict(entity)
+            if "entity_id" in normalized_entity and "id" not in normalized_entity:
+                normalized_entity["id"] = normalized_entity["entity_id"]
+            normalized_entity.setdefault("attributes", {})
+            normalized_entity.setdefault("placeholders", {})
+            normalized_entity.setdefault("source_refs", [source_id])
+            normalized_entity.setdefault("status", "active")
+            entities.append(normalized_entity)
+
+        relations = []
+        for relation in result.get("relation_candidates", []):
+            normalized_relation = dict(relation)
+            if "source_entity" in normalized_relation and "source" not in normalized_relation:
+                normalized_relation["source"] = normalized_relation["source_entity"]
+            if "target_entity" in normalized_relation and "target" not in normalized_relation:
+                normalized_relation["target"] = normalized_relation["target_entity"]
+            if "relation_type" in normalized_relation and "relation" not in normalized_relation:
+                normalized_relation["relation"] = normalized_relation["relation_type"]
+            normalized_relation.setdefault("source_refs", [source_id])
+            normalized_relation.setdefault("status", "active")
+            relations.append(normalized_relation)
+
+        events = []
+        for event in result.get("event_candidates", []):
+            normalized_event = dict(event)
+            if "event_id" in normalized_event and "id" not in normalized_event:
+                normalized_event["id"] = normalized_event["event_id"]
+            if "participants" in normalized_event and "entities" not in normalized_event:
+                normalized_event["entities"] = normalized_event["participants"]
+            normalized_event.setdefault("source_refs", [source_id])
+            normalized_event.setdefault("status", "active")
+            events.append(normalized_event)
+
+        return {
+            "claims": claims,
+            "entity_candidates": entities,
+            "relation_candidates": relations,
+            "event_candidates": events,
+        }
 
     @staticmethod
     def _append_json(path: Path, items: List[Dict[str, Any]]) -> None:

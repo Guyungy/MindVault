@@ -4,8 +4,9 @@ import shutil
 import unittest
 
 from main import run_pipeline
-from mindvault.runtime.app import load_sources_from_path
+from mindvault.runtime.app import VaultRuntime, load_sources_from_path
 from mindvault.runtime.renderers.wiki import WikiExporter
+from mindvault.runtime.models import NormalizedChunk
 
 
 class MindVaultV02Tests(unittest.TestCase):
@@ -73,8 +74,10 @@ class MindVaultV02Tests(unittest.TestCase):
         )
         wiki_index = out_dir / "index.md"
         tables_json = out_dir / "tables.json"
+        pages_json = out_dir / "pages.json"
         self.assertTrue(wiki_index.exists())
         self.assertTrue(tables_json.exists())
+        self.assertTrue(pages_json.exists())
         self.assertIn("index", result)
 
     def test_directory_loader_supports_md_txt_json(self):
@@ -94,6 +97,20 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertIn("a.md", source_ids)
         self.assertIn("b.txt", source_ids)
         self.assertIn("json_one", source_ids)
+
+    def test_runtime_fallback_parser_extracts_entities(self):
+        runtime = VaultRuntime(self.workspace)
+        chunk = NormalizedChunk(
+            chunk_id="chunk_1",
+            source_id="safe_doc",
+            chunk_type="section",
+            text="广州文化中心推出周末亲子阅读活动，活动地点位于天河区，报名方式为线上预约。",
+            context_hints={"source_type": "doc", "language": "zh"},
+        )
+        result = runtime._fallback_parse_chunk(chunk)
+
+        self.assertGreater(len(result.get("entity_candidates", [])), 0)
+        self.assertGreater(len(result.get("claims", [])), 0)
 
 
 if __name__ == "__main__":

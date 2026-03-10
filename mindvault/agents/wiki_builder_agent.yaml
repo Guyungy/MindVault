@@ -1,0 +1,22 @@
+name: wiki_builder_agent
+role: >
+  你是 MindVault 的 Wiki Builder。请把知识库状态重组为可读的页面集合，
+  输出结构化的 wiki pages JSON，而不是普通报告。
+
+input_artifacts:
+  - canonical_kb_state
+  - governance_summary
+  - version_meta
+
+output_artifacts:
+  - wiki_pages_json
+
+model_route: report
+prompt_template: mindvault/prompts/wiki_builder_agent.md
+
+retry_policy:
+  max_retries: 2
+  fallback: template_fallback
+
+chunk_strategy: single
+max_input_tokens: 8192

@@ -80,6 +80,13 @@ class ParserAgent:
         (r"([A-Za-z0-9\u4e00-\u9fa5]+会所)", "venue"),
         (r"([A-Za-z0-9\u4e00-\u9fa5]+公寓)", "venue"),
         (r"([A-Za-z0-9\u4e00-\u9fa5]+酒店)", "venue"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+图书馆)", "venue"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+体育中心)", "venue"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+文化中心)", "venue"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+活动站)", "venue"),
+        (r"([A-Za-z0-9\u4e00-\u9fa5]+社区)", "organization"),
+        (r"(佛山|广州|南海区|天河区|白云区|顺德区|禅城区)", "area"),
+        (r"(亲子阅读活动|健康讲座|夜间服务|预约制)", "service"),
     ]
 
     def __init__(self) -> None:
@@ -95,11 +102,15 @@ class ParserAgent:
             text = doc["text"]
             source_ref = doc.get("source", f"doc_{idx}")
             found_entity_ids: List[str] = []
+            entity_name_map: Dict[str, str] = {}
 
             for pattern, entity_type in self.entity_patterns:
                 for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-                    name = match.group(1).strip().title()
+                    raw_name = match.group(1).strip()
+                    name = raw_name if self._contains_cjk(raw_name) else raw_name.title()
                     entity_id = f"ent_{entity_type}_{self._slug(name)}"
+                    if entity_id in entity_name_map:
+                        continue
                     placeholders = self._extract_placeholders(text)
                     attributes = self._extract_attributes(text)
                     entity = Entity(
@@ -112,7 +123,10 @@ class ParserAgent:
                     )
                     entities.append(entity)
                     found_entity_ids.append(entity_id)
+                    entity_name_map[entity_id] = name
                     claims.extend(self._claims_for_entity(entity, text, workspace_id, source_ref, doc))
+
+            relations.extend(self._infer_relations(text, found_entity_ids, entity_name_map, source_ref))
 
             if any(k in text.lower() for k in ["appointment", "update", "scheduled", "maintenance"]):
                 event_id = f"evt_{idx}"
@@ -236,6 +250,8 @@ class ParserAgent:
         price = re.search(r"\$(\d+(?:\.\d+)?)", text)
         duration = re.search(r"(\d+)\s*(?:hours?|hrs?)", text, flags=re.IGNORECASE)
         rating = re.search(r"rating\s*(\d(?:\.\d)?)", text, flags=re.IGNORECASE)
+        zh_location = re.search(r"(位于|在)([\u4e00-\u9fa5]{2,12}(?:区|市|镇|街道))", text)
+        zh_schedule = re.search(r"(每周[一二三四五六日天][上下]午|周末|夜间服务时段|线上预约)", text)
 
         if price:
             attrs["price"] = float(price.group(1))
@@ -243,11 +259,17 @@ class ParserAgent:
             attrs["duration_hours"] = int(duration.group(1))
         if rating:
             attrs["rating"] = float(rating.group(1))
+        if zh_location:
+            attrs["location"] = zh_location.group(2)
+        if zh_schedule:
+            attrs["schedule"] = zh_schedule.group(1)
 
         if "urgent" in text.lower():
             attrs["tags"].append("urgent")
         if "recommended" in text.lower() or "recommend" in text.lower():
             attrs["tags"].append("recommended")
+        if any(token in text for token in ["图书馆", "阅读", "讲座"]):
+            attrs["tags"].append("public_service")
         return attrs
 
     @staticmethod
@@ -263,7 +285,57 @@ class ParserAgent:
 
     @staticmethod
     def _slug(name: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+        slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+        return slug or re.sub(r"\W+", "_", name).strip("_").lower() or "item"
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+    def _infer_relations(
+        self,
+        text: str,
+        found_entity_ids: List[str],
+        entity_name_map: Dict[str, str],
+        source_ref: str,
+    ) -> List[Relation]:
+        id_to_type = {entity_id: entity_id.split("_")[1] if "_" in entity_id else "" for entity_id in found_entity_ids}
+        areas = [entity_id for entity_id, entity_type in id_to_type.items() if entity_type == "area"]
+        venues = [entity_id for entity_id, entity_type in id_to_type.items() if entity_type == "venue"]
+        services = [entity_id for entity_id, entity_type in id_to_type.items() if entity_type == "service"]
+        relations: List[Relation] = []
+
+        if areas:
+            primary_area = areas[0]
+            for venue_id in venues:
+                relations.append(Relation(
+                    source=venue_id,
+                    target=primary_area,
+                    relation="located_in",
+                    evidence=text,
+                    source_refs=[source_ref],
+                ))
+            for service_id in services:
+                relations.append(Relation(
+                    source=service_id,
+                    target=primary_area,
+                    relation="offered_in",
+                    evidence=text,
+                    source_refs=[source_ref],
+                ))
+
+        if venues and services:
+            primary_venue = venues[0]
+            for service_id in services:
+                relations.append(Relation(
+                    source=primary_venue,
+                    target=service_id,
+                    relation="hosts_service",
+                    evidence=text,
+                    source_refs=[source_ref],
+                ))
+
+        return relations
 
 
 class SchemaDesignerAgent:

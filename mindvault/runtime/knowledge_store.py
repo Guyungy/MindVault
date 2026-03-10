@@ -72,7 +72,7 @@ class KnowledgeStore:
             if not eid:
                 continue
 
-            supporting = [c["claim_id"] for c in claim_map.get(eid, [])]
+            supporting = [c.get("id", c.get("claim_id", "")) for c in claim_map.get(eid, []) if c.get("id", c.get("claim_id", ""))]
 
             if eid in existing:
                 ent = existing[eid]
