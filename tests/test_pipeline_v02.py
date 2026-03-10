@@ -7,6 +7,7 @@ from main import run_pipeline
 from mindvault.runtime.app import VaultRuntime, load_sources_from_path
 from mindvault.runtime.renderers.wiki import WikiExporter
 from mindvault.runtime.models import NormalizedChunk
+from mindvault.runtime.task_runtime import TaskRuntime
 
 
 class MindVaultV02Tests(unittest.TestCase):
@@ -133,6 +134,21 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertGreaterEqual(len(multi_db.get("databases", [])), 3)
         names = {db.get("name") for db in multi_db.get("databases", [])}
         self.assertIn("claims", names)
+
+    def test_task_runtime_persists_state_and_steps(self):
+        task_root = self.workspace_path / "tasks"
+        runtime = TaskRuntime(task_root, goal="Test goal", workspace_id=self.workspace)
+        runtime.start()
+        runtime.heartbeat(step="parse", agent="parse_agent", resume_hint="Parsing input.")
+        runtime.log_step("parse", "ok", chunks=3)
+        runtime.complete("Done.")
+
+        task_json = json.loads((runtime.task_dir / "task.json").read_text(encoding="utf-8"))
+        step_log = (runtime.task_dir / "step_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
+
+        self.assertEqual(task_json["status"], "completed")
+        self.assertEqual(task_json["current_step"], "parse")
+        self.assertGreaterEqual(len(step_log), 1)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from mindvault.runtime.version_store import VersionStore
 from mindvault.runtime.model_router import ModelRouter
 from mindvault.runtime.agent_executor import AgentExecutor
 from mindvault.runtime.trace_logger import TraceLogger
+from mindvault.runtime.task_runtime import TaskRuntime
 from mindvault.adapters.doc_adapter import DocAdapter
 from mindvault.adapters.chat_adapter import ChatAdapter
 from mindvault.governance.confidence_engine import ConfidenceEngine
@@ -75,173 +76,213 @@ class VaultRuntime:
 
     def ingest(self, sources: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Run the full pipeline on a list of source records."""
-        started = datetime.utcnow().isoformat()
-        self.trace.log("pipeline_start", workspace=self.ctx.workspace_id, source_count=len(sources))
+        task = TaskRuntime(self.ctx.task_dir, goal="Build structured knowledge databases from input sources.", workspace_id=self.ctx.workspace_id)
+        task.start()
+        self.trace.log("pipeline_start", workspace=self.ctx.workspace_id, source_count=len(sources), task_id=task.task_id)
+        task.log_step("pipeline_start", "ok", source_count=len(sources))
 
-        # ── Step 1: Ingest & raw storage ─────────────────────────────────────
-        for src in sources:
-            src.setdefault("source_id", f"src_{hashlib.md5(src.get('content', '')[:200].encode()).hexdigest()[:8]}")
-            src.setdefault("source_type", self._detect_source_type(src))
-            src.setdefault("ingested_at", datetime.utcnow().isoformat())
+        try:
+            self._mark_task(task, "ingest", resume_hint="Persisting raw sources.")
+            for src in sources:
+                src.setdefault("source_id", f"src_{hashlib.md5(src.get('content', '')[:200].encode()).hexdigest()[:8]}")
+                src.setdefault("source_type", self._detect_source_type(src))
+                src.setdefault("ingested_at", datetime.utcnow().isoformat())
 
-        raw_path = self.ctx.raw_dir / "sources.json"
-        self._append_json(raw_path, sources)
-        self.trace.log("ingest_complete", source_count=len(sources))
+            raw_path = self.ctx.raw_dir / "sources.json"
+            self._append_json(raw_path, sources)
+            self.trace.log("ingest_complete", source_count=len(sources))
+            task.log_step("ingest", "ok", sources=len(sources), output=str(raw_path))
+            task.add_artifact("sources", str(raw_path))
 
-        # ── Step 2: Adapt ────────────────────────────────────────────────────
-        all_chunks = []
-        for src in sources:
-            adapter = self._adapters.get(src["source_type"], DocAdapter())
-            chunks = adapter.adapt(src)
-            all_chunks.extend(chunks)
-        self.trace.log("adapt_complete", chunk_count=len(all_chunks))
+            self._mark_task(task, "adapt", resume_hint="Adapting sources into normalized chunks.")
+            all_chunks = []
+            for src in sources:
+                adapter = self._adapters.get(src["source_type"], DocAdapter())
+                chunks = adapter.adapt(src)
+                all_chunks.extend(chunks)
+            self.trace.log("adapt_complete", chunk_count=len(all_chunks))
+            task.log_step("adapt", "ok", chunks=len(all_chunks))
 
-        # ── Step 3: Parse (LLM) ─────────────────────────────────────────────
-        all_claims: List[Dict[str, Any]] = []
-        all_entities: List[Dict[str, Any]] = []
-        all_relations: List[Dict[str, Any]] = []
-        all_events: List[Dict[str, Any]] = []
+            self._mark_task(task, "parse", agent="parse_agent", resume_hint="Parsing chunks into atomic knowledge.")
+            all_claims: List[Dict[str, Any]] = []
+            all_entities: List[Dict[str, Any]] = []
+            all_relations: List[Dict[str, Any]] = []
+            all_events: List[Dict[str, Any]] = []
 
-        parse_agent_path = Path("mindvault/agents/parse_agent.yaml")
-        for chunk in all_chunks:
-            context = {
-                "chunk_text": chunk.text,
-                "source_id": chunk.source_id,
-                "source_type": chunk.context_hints.get("source_type", "doc"),
-                "language": chunk.context_hints.get("language", "en"),
+            parse_agent_path = Path("mindvault/agents/parse_agent.yaml")
+            for chunk in all_chunks:
+                context = {
+                    "chunk_text": chunk.text,
+                    "source_id": chunk.source_id,
+                    "source_type": chunk.context_hints.get("source_type", "doc"),
+                    "language": chunk.context_hints.get("language", "en"),
+                }
+                result = self.executor.execute(parse_agent_path, context)
+
+                if isinstance(result, dict) and "claims" in result:
+                    normalized = self._normalize_parse_result(result, chunk)
+                    all_claims.extend(normalized.get("claims", []))
+                    all_entities.extend(normalized.get("entity_candidates", []))
+                    all_relations.extend(normalized.get("relation_candidates", []))
+                    all_events.extend(normalized.get("event_candidates", []))
+                else:
+                    fallback = self._fallback_parse_chunk(chunk)
+                    all_claims.extend(fallback.get("claims", []))
+                    all_entities.extend(fallback.get("entity_candidates", []))
+                    all_relations.extend(fallback.get("relation_candidates", []))
+                    all_events.extend(fallback.get("event_candidates", []))
+                    self.trace.log(
+                        "parse_fallback",
+                        chunk_id=chunk.chunk_id,
+                        reason="no_structured_output",
+                        fallback_claims=len(fallback.get("claims", [])),
+                        fallback_entities=len(fallback.get("entity_candidates", [])),
+                    )
+                    task.log_step("parse_chunk", "fallback", chunk_id=chunk.chunk_id)
+
+            self.trace.log("parse_complete",
+                           claims=len(all_claims), entities=len(all_entities),
+                           relations=len(all_relations), events=len(all_events))
+            task.log_step("parse", "ok", claims=len(all_claims), entities=len(all_entities), relations=len(all_relations), events=len(all_events))
+
+            extracted_path = self._save_extracted(all_claims, all_entities, all_relations, all_events)
+            task.add_artifact("extracted", str(extracted_path))
+
+            self._mark_task(task, "confidence", resume_hint="Scoring and annotating extracted knowledge.")
+            for claim in all_claims:
+                claim["confidence"] = self.confidence.score_claim(claim)
+            self.confidence.annotate_items(all_entities)
+            self.confidence.annotate_items(all_relations)
+            self.trace.log("confidence_complete")
+            task.log_step("confidence", "ok")
+
+            self._mark_task(task, "schema", agent="schema_engine", resume_hint="Designing evolving schema.")
+            fragment = {
+                "entity_candidates": all_entities,
+                "relation_candidates": all_relations,
+                "event_candidates": all_events,
+                "claims": all_claims,
             }
-            result = self.executor.execute(parse_agent_path, context)
+            schema_info = self.schema_evo.evolve(fragment)
+            fragment["schema"] = schema_info["schema"]
+            self.trace.log("schema_evolution_complete", promoted=schema_info["schema_candidates"].get("recent_promotions", {}))
+            task.log_step("schema", "ok")
 
-            if isinstance(result, dict) and "claims" in result:
-                normalized = self._normalize_parse_result(result, chunk)
-                all_claims.extend(normalized.get("claims", []))
-                all_entities.extend(normalized.get("entity_candidates", []))
-                all_relations.extend(normalized.get("relation_candidates", []))
-                all_events.extend(normalized.get("event_candidates", []))
-            else:
-                fallback = self._fallback_parse_chunk(chunk)
-                all_claims.extend(fallback.get("claims", []))
-                all_entities.extend(fallback.get("entity_candidates", []))
-                all_relations.extend(fallback.get("relation_candidates", []))
-                all_events.extend(fallback.get("event_candidates", []))
-                self.trace.log(
-                    "parse_fallback",
-                    chunk_id=chunk.chunk_id,
-                    reason="no_structured_output",
-                    fallback_claims=len(fallback.get("claims", [])),
-                    fallback_entities=len(fallback.get("entity_candidates", [])),
-                )
+            self._mark_task(task, "curation", agent="memory_curator", resume_hint="Selecting canonical entities.")
+            curated = self.memory_curator.curate(all_entities)
+            self.trace.log("memory_curation_complete", promote=len(curated["promote"]), hold=len(curated["hold"]))
+            fragment["entity_candidates"] = curated["promote"]
+            if curated["hold"]:
+                hold_path = self.ctx.governance_dir / "held_entities.json"
+                self._append_json(hold_path, curated["hold"])
+                task.add_artifact("held_entities", str(hold_path))
+            task.log_step("curation", "ok", promote=len(curated["promote"]), hold=len(curated["hold"]))
 
-        self.trace.log("parse_complete",
-                       claims=len(all_claims), entities=len(all_entities),
-                       relations=len(all_relations), events=len(all_events))
+            self._mark_task(task, "merge", agent="knowledge_store", resume_hint="Merging fragment into canonical KB.")
+            state = self.kb.merge(fragment)
+            self.trace.log("merge_complete")
+            task.add_artifact("knowledge_base", str(self.ctx.kb_path))
+            task.log_step("merge", "ok", entities=len(state.get("entities", [])))
 
-        # Save extracted layer
-        self._save_extracted(all_claims, all_entities, all_relations, all_events)
+            self._mark_task(task, "governance", agent="governance", resume_hint="Auditing conflicts and placeholders.")
+            conflict_result = self.conflicts.audit(state)
+            self.trace.log("conflict_audit_complete", unresolved=conflict_result.get("unresolved_count", 0))
 
-        # ── Step 4: Confidence scoring ───────────────────────────────────────
-        for claim in all_claims:
-            claim["confidence"] = self.confidence.score_claim(claim)
-        self.confidence.annotate_items(all_entities)
-        self.confidence.annotate_items(all_relations)
-        self.trace.log("confidence_complete")
+            ph_records = self.placeholders.scan(state)
+            state["placeholders"] = ph_records
+            ph_path = self.ctx.governance_dir / "placeholders.json"
+            ph_path.write_text(json.dumps(ph_records, indent=2, ensure_ascii=False), encoding="utf-8")
+            self.trace.log("placeholder_scan_complete", count=len(ph_records))
+            task.add_artifact("placeholders", str(ph_path))
+            task.log_step("governance", "ok", conflicts=conflict_result.get("unresolved_count", 0), placeholders=len(ph_records))
 
-        # ── Step 5: Schema evolution ─────────────────────────────────────────
-        fragment = {
-            "entity_candidates": all_entities,
-            "relation_candidates": all_relations,
-            "event_candidates": all_events,
-            "claims": all_claims,
-        }
-        schema_info = self.schema_evo.evolve(fragment)
-        fragment["schema"] = schema_info["schema"]
-        self.trace.log("schema_evolution_complete", promoted=schema_info["schema_candidates"].get("recent_promotions", {}))
+            self._mark_task(task, "versioning", agent="version_store", resume_hint="Snapshotting canonical state.")
+            governance = {
+                "conflicts": conflict_result,
+                "schema_candidates": schema_info["schema_candidates"],
+                "placeholders": ph_records,
+            }
+            version_meta = self.version_store.create_snapshot(state, governance)
+            self.kb.add_version_record(version_meta)
+            self.trace.log("version_snapshot_complete", version=version_meta["version"])
+            task.add_artifact("snapshot", version_meta.get("snapshot_path", ""))
+            task.add_artifact("changelog", version_meta.get("changelog_path", ""))
+            task.log_step("versioning", "ok", version=version_meta.get("version"))
 
-        # ── Step 6: Memory curation ──────────────────────────────────────────
-        curated = self.memory_curator.curate(all_entities)
-        self.trace.log("memory_curation_complete", promote=len(curated["promote"]), hold=len(curated["hold"]))
+            self._mark_task(task, "insight", agent="insight_generator", resume_hint="Generating insight summaries.")
+            insights = self._generate_insights(state)
+            self.kb.append_insights(insights)
+            state = self.kb.state
+            self.trace.log("insight_complete", count=len(insights))
+            task.log_step("insight", "ok", count=len(insights))
 
-        # Use promoted entities for canonical merge
-        fragment["entity_candidates"] = curated["promote"]
-        # Save held entities separately
-        if curated["hold"]:
-            hold_path = self.ctx.governance_dir / "held_entities.json"
-            self._append_json(hold_path, curated["hold"])
+            self._mark_task(task, "report", agent="report_agent", resume_hint="Writing report artifact.")
+            report_data = self._generate_report(state, insights, governance)
+            self.ctx.report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            self.trace.log("report_complete")
+            task.add_artifact("report", str(self.ctx.report_path))
+            task.log_step("report", "ok", output=str(self.ctx.report_path))
 
-        # ── Step 7: Merge into canonical ─────────────────────────────────────
-        state = self.kb.merge(fragment)
-        self.trace.log("merge_complete")
+            self._mark_task(task, "dashboard", agent="dashboard_renderer", resume_hint="Rendering dashboard.")
+            dashboard_path = self._render_dashboard(state, governance, version_meta)
+            self.trace.log("dashboard_complete")
+            task.add_artifact("dashboard", dashboard_path)
+            task.log_step("dashboard", "ok", output=dashboard_path)
 
-        # ── Step 8: Conflict audit ───────────────────────────────────────────
-        conflict_result = self.conflicts.audit(state)
-        self.trace.log("conflict_audit_complete", unresolved=conflict_result.get("unresolved_count", 0))
+            self._mark_task(task, "multi_db", agent="database_builder_agent", resume_hint="Building database plan and multi-db outputs.")
+            database_plan = self._generate_database_plan(state, governance)
+            multi_db = self._generate_multi_db(state, database_plan)
+            multi_db_paths = self._export_multi_db(database_plan, multi_db)
+            self.trace.log("multi_db_export_complete", data=multi_db_paths.get("data", ""))
+            for name, value in multi_db_paths.items():
+                task.add_artifact(f"multi_db_{name}", value)
+            task.log_step("multi_db", "ok", output=multi_db_paths.get("data", ""))
 
-        # ── Step 9: Placeholder scan ─────────────────────────────────────────
-        ph_records = self.placeholders.scan(state)
-        state["placeholders"] = ph_records
-        ph_path = self.ctx.governance_dir / "placeholders.json"
-        ph_path.write_text(json.dumps(ph_records, indent=2, ensure_ascii=False), encoding="utf-8")
-        self.trace.log("placeholder_scan_complete", count=len(ph_records))
+            self._mark_task(task, "wiki", agent="wiki_builder_agent", resume_hint="Rendering wiki pages.")
+            wiki_paths = self._export_wiki(state, governance, version_meta)
+            self.trace.log("wiki_export_complete", index=wiki_paths.get("index", ""))
+            for name, value in wiki_paths.items():
+                if isinstance(value, str):
+                    task.add_artifact(f"wiki_{name}", value)
+            task.log_step("wiki", "ok", output=wiki_paths.get("index", ""))
 
-        # ── Step 10: Version snapshot ────────────────────────────────────────
-        governance = {
-            "conflicts": conflict_result,
-            "schema_candidates": schema_info["schema_candidates"],
-            "placeholders": ph_records,
-        }
-        version_meta = self.version_store.create_snapshot(state, governance)
-        self.kb.add_version_record(version_meta)
-        self.trace.log("version_snapshot_complete", version=version_meta["version"])
+            trace_path = self.ctx.root_dir / "agent_trace.json"
+            self.trace.save(trace_path)
+            task.add_artifact("trace", str(trace_path))
+            task.complete("Pipeline completed successfully.")
 
-        # ── Step 11: Insight generation (LLM or template) ────────────────────
-        insights = self._generate_insights(state)
-        self.kb.append_insights(insights)
-        state = self.kb.state
-        self.trace.log("insight_complete", count=len(insights))
-
-        # ── Step 12: Report ──────────────────────────────────────────────────
-        report_data = self._generate_report(state, insights, governance)
-        self.ctx.report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        self.trace.log("report_complete")
-
-        # ── Step 13: Dashboard ───────────────────────────────────────────────
-        dashboard_path = self._render_dashboard(state, governance, version_meta)
-        self.trace.log("dashboard_complete")
-
-        # ── Step 14: Multi-DB export ────────────────────────────────────────
-        database_plan = self._generate_database_plan(state, governance)
-        multi_db = self._generate_multi_db(state, database_plan)
-        multi_db_paths = self._export_multi_db(database_plan, multi_db)
-        self.trace.log("multi_db_export_complete", data=multi_db_paths.get("data", ""))
-
-        # ── Step 15: Wiki export ────────────────────────────────────────────
-        wiki_paths = self._export_wiki(state, governance, version_meta)
-        self.trace.log("wiki_export_complete", index=wiki_paths.get("index", ""))
-
-        # ── Save trace ───────────────────────────────────────────────────────
-        self.trace.save(self.ctx.root_dir / "agent_trace.json")
-
-        return {
-            "workspace": self.ctx.workspace_id,
-            "knowledge_base": str(self.ctx.kb_path),
-            "snapshot": version_meta.get("snapshot_path", ""),
-            "changelog": version_meta.get("changelog_path", ""),
-            "report": str(self.ctx.report_path),
-            "dashboard": dashboard_path,
-            "multi_db": multi_db_paths,
-            "wiki": wiki_paths,
-            "trace": str(self.ctx.root_dir / "agent_trace.json"),
-            "stats": {
-                "sources": len(sources),
-                "chunks": len(all_chunks),
-                "claims": len(all_claims),
-                "entities": len(state.get("entities", [])),
-                "relations": len(state.get("relations", [])),
-                "events": len(state.get("events", [])),
-                "conflicts": conflict_result.get("unresolved_count", 0),
-                "placeholders_missing": sum(1 for p in ph_records if p.get("status") == "missing"),
-            },
-        }
+            return {
+                "workspace": self.ctx.workspace_id,
+                "task": {
+                    "task_id": task.task_id,
+                    "task_json": str(task.task_path),
+                    "step_log": str(task.step_log_path),
+                },
+                "knowledge_base": str(self.ctx.kb_path),
+                "snapshot": version_meta.get("snapshot_path", ""),
+                "changelog": version_meta.get("changelog_path", ""),
+                "report": str(self.ctx.report_path),
+                "dashboard": dashboard_path,
+                "multi_db": multi_db_paths,
+                "wiki": wiki_paths,
+                "trace": str(trace_path),
+                "stats": {
+                    "sources": len(sources),
+                    "chunks": len(all_chunks),
+                    "claims": len(all_claims),
+                    "entities": len(state.get("entities", [])),
+                    "relations": len(state.get("relations", [])),
+                    "events": len(state.get("events", [])),
+                    "conflicts": conflict_result.get("unresolved_count", 0),
+                    "placeholders_missing": sum(1 for p in ph_records if p.get("status") == "missing"),
+                },
+            }
+        except Exception as exc:
+            task.log_step("pipeline", "failed", error=str(exc))
+            task.fail(str(exc), step=task.state.get("current_step", ""))
+            self.trace.log("pipeline_failed", error=str(exc), task_id=task.task_id)
+            self.trace.save(self.ctx.root_dir / "agent_trace.json")
+            raise
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
@@ -254,7 +295,7 @@ class VaultRuntime:
             return "chat"
         return "doc"
 
-    def _save_extracted(self, claims, entities, relations, events) -> None:
+    def _save_extracted(self, claims, entities, relations, events) -> Path:
         existing = sorted(self.ctx.extracted_dir.glob("extracted_v*.json"))
         version = len(existing) + 1
         path = self.ctx.extracted_dir / f"extracted_v{version}.json"
@@ -265,6 +306,7 @@ class VaultRuntime:
             "event_candidates": events,
             "extracted_at": datetime.utcnow().isoformat(),
         }, indent=2, ensure_ascii=False), encoding="utf-8")
+        return path
 
     def _generate_insights(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Try LLM insight, fall back to template."""
@@ -646,6 +688,11 @@ class VaultRuntime:
                 existing = []
         existing.extend(items)
         path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _mark_task(task: TaskRuntime, step: str, *, agent: str = "", resume_hint: str = "") -> None:
+        task.heartbeat(step=step, agent=agent, resume_hint=resume_hint)
+        task.log_step(step, "running", agent=agent, resume_hint=resume_hint)
 
 
 def main():

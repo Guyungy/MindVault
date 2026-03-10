@@ -116,6 +116,29 @@ python3 -m mindvault.runtime.app -w workspace -i sample_data/benchmarks/semi_str
 
 运行成功后，终端会打印各产物路径（knowledge_base、report、dashboard、wiki 等）。
 
+### 4.6 启动前端查看器
+
+项目现在带了一个 Node.js 前端查看器，用来浏览 `multi_db.json` 产物。
+
+```bash
+cd frontend
+npm run dev
+```
+
+默认地址：
+
+```bash
+http://localhost:4310
+```
+
+前端能力：
+- 自动列出已有 workspace
+- 读取 `output/workspaces/<workspace>/multi_db/multi_db.json`
+- 切换不同数据库
+- 搜索当前表
+- 查看行详情
+- 浏览表间关系
+
 ### 4.5 批量处理一个文件夹
 
 系统现在支持直接输入一个目录，自动递归处理其中所有 `.md`、`.txt`、`.json` 文件。

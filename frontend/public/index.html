@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MindVault Workspace Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <p class="eyebrow">MindVault</p>
+          <h1>Workspace Console</h1>
+          <p class="muted">查看多数据库结构、关联与行详情。</p>
+        </div>
+        <div class="sidebar-section">
+          <label class="section-title" for="workspace-select">Workspace</label>
+          <select id="workspace-select"></select>
+        </div>
+        <div class="sidebar-section">
+          <div class="section-title">Summary</div>
+          <div id="workspace-summary" class="summary-grid"></div>
+        </div>
+        <div class="sidebar-section">
+          <div class="section-title">Latest Task</div>
+          <div id="task-summary" class="task-summary"></div>
+        </div>
+        <div class="sidebar-section">
+          <div class="section-title">Relations</div>
+          <div id="relation-list" class="relation-list"></div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Knowledge Databases</p>
+            <h2 id="workspace-title">Loading…</h2>
+            <p id="workspace-description" class="muted"></p>
+          </div>
+          <div class="hero-actions">
+            <input id="search-input" type="search" placeholder="搜索当前数据库..." />
+          </div>
+        </section>
+
+        <section class="database-switcher">
+          <div id="database-tabs" class="tabs"></div>
+        </section>
+
+        <section class="content-grid">
+          <div class="table-panel card">
+            <div class="panel-head">
+              <div>
+                <h3 id="table-title">Database</h3>
+                <p id="table-meta" class="muted"></p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table id="database-table"></table>
+            </div>
+          </div>
+
+          <div class="detail-panel card">
+            <div class="panel-head">
+              <div>
+                <h3>Row Detail</h3>
+                <p class="muted">点击任意行查看完整字段。</p>
+              </div>
+            </div>
+            <pre id="row-detail" class="row-detail">No row selected.</pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+  </html>
