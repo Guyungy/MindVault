@@ -1,8 +1,12 @@
 import { createServer } from "node:http";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile, mkdir } from "node:fs/promises";
 import { createReadStream, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import Busboy from "busboy";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +37,13 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname === "/api/workspaces") {
     return sendJson(res, await listWorkspaces());
+  }
+
+  if (url.pathname.startsWith("/api/workspaces/") && url.pathname.endsWith("/ingest") && req.method === "POST") {
+    const workspaceId = decodeURIComponent(
+      url.pathname.replace("/api/workspaces/", "").replace("/ingest", "").replace(/\/$/, ""),
+    );
+    return handleIngest(req, res, workspaceId);
   }
 
   if (url.pathname.startsWith("/api/workspaces/")) {
@@ -224,4 +235,150 @@ function getHeartbeatAgeSeconds(value) {
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) return null;
   return Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+}
+
+async function handleIngest(req, res, workspaceId) {
+  const workspaceRoot = path.join(workspacesDir, workspaceId);
+  if (!existsSync(workspaceRoot)) {
+    return sendJson(res, { error: "workspace not found" }, 404);
+  }
+
+  try {
+    const { fields, uploads } = await parseIngestRequest(req);
+    const sources = buildIngestSources(fields, uploads);
+    if (!sources.length) {
+      return sendJson(res, { error: "no data provided" }, 400);
+    }
+
+    const tempDir = path.join(tmpdir(), "mindvault_ingest_inputs");
+    await mkdir(tempDir, { recursive: true });
+    const tempPath = path.join(tempDir, `ingest_${workspaceId}_${Date.now()}.json`);
+    await writeFile(tempPath, JSON.stringify(sources, null, 2), "utf-8");
+
+    const result = await runIngestCommand(workspaceId, tempPath);
+    return sendJson(res, { success: true, result });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
+}
+
+function parseIngestRequest(req) {
+  return new Promise((resolve, reject) => {
+    const busboy = new Busboy({ headers: req.headers });
+    const fields = {};
+    const uploads = [];
+
+    busboy.on("field", (name, value) => {
+      fields[name] = value;
+    });
+
+    busboy.on("file", (fieldname, file, { filename }) => {
+      const buffers = [];
+      file.on("data", (chunk) => buffers.push(chunk));
+      file.on("end", () => {
+        uploads.push({
+          fieldname,
+          filename,
+          content: Buffer.concat(buffers).toString("utf-8"),
+        });
+      });
+    });
+
+    busboy.on("error", reject);
+    busboy.on("finish", () => resolve({ fields, uploads }));
+    req.pipe(busboy);
+  });
+}
+
+function buildIngestSources(fields, uploads) {
+  const sources = [];
+  const contextHints = {};
+  if (fields.target_db) contextHints.target_db = fields.target_db;
+  if (fields.new_db_name) contextHints.new_db_name = fields.new_db_name;
+  if (fields.note) contextHints.note = fields.note;
+
+  if (fields.text_input) {
+    sources.push({
+      source_id: `text_${Date.now()}`,
+      source_type: "doc",
+      content: fields.text_input,
+      context_hints: contextHints,
+    });
+  }
+
+  if (fields.json_input) {
+    try {
+      const parsed = JSON.parse(fields.json_input);
+      if (Array.isArray(parsed)) {
+        parsed.forEach((item, index) => {
+          sources.push({
+            ...item,
+            source_id: item.source_id || `json_array_${index}_${Date.now()}`,
+            context_hints: contextHints,
+          });
+        });
+      } else if (typeof parsed === "object" && parsed !== null) {
+        sources.push({
+          ...parsed,
+          source_id: parsed.source_id || `json_${Date.now()}`,
+          context_hints: contextHints,
+        });
+      }
+    } catch (err) {
+      sources.push({
+        source_id: `json_invalid_${Date.now()}`,
+        source_type: "doc",
+        content: fields.json_input,
+        context_hints: { ...contextHints, parse_error: err.message },
+      });
+    }
+  }
+
+  uploads.forEach((upload, index) => {
+    sources.push({
+      source_id: `upload_${index}_${Date.now()}`,
+      source_type: "doc",
+      content: upload.content,
+      metadata: { filename: upload.filename },
+      context_hints: contextHints,
+    });
+  });
+
+  return sources;
+}
+
+function runIngestCommand(workspaceId, inputPath) {
+  return new Promise((resolve, reject) => {
+    const python = spawn("python3", ["-m", "mindvault.runtime.app", "-w", workspaceId, "-i", inputPath], {
+      cwd: rootDir,
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    python.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    python.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    python.on("error", reject);
+    python.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || "Python ingest failed"));
+        return;
+      }
+      const start = stdout.lastIndexOf("{");
+      if (start === -1) {
+        return reject(new Error("Unexpected ingest output"));
+      }
+      try {
+        const result = JSON.parse(stdout.slice(start));
+        resolve(result);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
 }
