@@ -106,7 +106,7 @@ export OPENAI_API_KEY=your_key
 ### 4.4 运行主流水线
 
 ```bash
-python3 -m mindvault.runtime.app -w demo -i sample_data/benchmarks/semi_structured.json
+python3 -m mindvault.runtime.app -w workspace -i sample_data/benchmarks/semi_structured.json
 ```
 
 参数说明：
@@ -121,13 +121,13 @@ python3 -m mindvault.runtime.app -w demo -i sample_data/benchmarks/semi_structur
 系统现在支持直接输入一个目录，自动递归处理其中所有 `.md`、`.txt`、`.json` 文件。
 
 ```bash
-python3 -m mindvault.runtime.app -w demo -i /Users/a1/Documents/GitHub/MindVault/data
+python3 -m mindvault.runtime.app -w workspace -i /Users/a1/Documents/GitHub/MindVault/data
 ```
 
 例如处理当前项目内的某个资料目录：
 
 ```bash
-python3 -m mindvault.runtime.app -w demo -i /Users/a1/Documents/GitHub/MindVault/sample_data
+python3 -m mindvault.runtime.app -w workspace -i /Users/a1/Documents/GitHub/MindVault/sample_data
 ```
 
 目录模式下的行为：
@@ -156,7 +156,7 @@ python3 -m mindvault.runtime.app -w demo -i /Users/a1/Documents/GitHub/MindVault
 也可以直接传入目录：
 
 ```bash
-python3 -m mindvault.runtime.app -w demo -i sample_data/benchmarks
+python3 -m mindvault.runtime.app -w workspace -i sample_data/benchmarks
 ```
 
 ### 5.2 输出（重点文件）
@@ -222,11 +222,11 @@ python3 -m unittest discover -s tests -v
 
 ### Q6：如何一次处理整个文件夹？
 - 直接把目录传给 `-i`。
-- 例如：`python3 -m mindvault.runtime.app -w demo -i sample_data/benchmarks`
+- 例如：`python3 -m mindvault.runtime.app -w workspace -i sample_data/benchmarks`
 - 系统会递归读取其中的 `.md`、`.txt`、`.json` 文件。
 
 ### Q2：如何避免不同实验相互污染？
-- 始终使用不同 `--workspace`（例如 `demo_v1`, `demo_v2`）。
+- 始终使用不同 `--workspace`（例如 `workspace_v1`, `workspace_v2`）。
 
 ### Q3：冲突值在哪里看？
 - `governance/conflicts.json`。

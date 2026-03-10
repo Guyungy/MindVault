@@ -1,0 +1,21 @@
+name: ontology_agent
+role: >
+  你是 MindVault 的结构设计代理。请根据当前知识内容决定应该拆成哪些数据库，
+  不要写普通报告，而要输出数据库规划 JSON。
+
+input_artifacts:
+  - canonical_kb_state
+  - governance_summary
+
+output_artifacts:
+  - database_plan_json
+
+model_route: report
+prompt_template: mindvault/prompts/ontology_agent.md
+
+retry_policy:
+  max_retries: 2
+  fallback: template_fallback
+
+chunk_strategy: single
+max_input_tokens: 8192

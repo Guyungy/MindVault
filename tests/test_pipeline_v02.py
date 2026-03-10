@@ -49,7 +49,7 @@ class MindVaultV02Tests(unittest.TestCase):
                         "id": "ent_venue_blue_harbor",
                         "type": "venue",
                         "name": "Blue Harbor",
-                        "attributes": {"location": "demo", "rating": 4.5},
+                        "attributes": {"location": "sample", "rating": 4.5},
                         "confidence": 0.9,
                         "updated_at": "2026-03-09T00:00:00",
                         "source_refs": ["demo_doc"],
@@ -111,6 +111,28 @@ class MindVaultV02Tests(unittest.TestCase):
 
         self.assertGreater(len(result.get("entity_candidates", [])), 0)
         self.assertGreater(len(result.get("claims", [])), 0)
+
+    def test_runtime_fallback_multi_db_outputs_multiple_databases(self):
+        runtime = VaultRuntime(self.workspace)
+        state = {
+            "entities": [
+                {"id": "ent_venue_a", "type": "venue", "name": "A", "attributes": {"location": "广州"}, "confidence": 0.7, "source_refs": ["s1"]},
+                {"id": "ent_service_b", "type": "service", "name": "B", "attributes": {"schedule": "周末"}, "confidence": 0.6, "source_refs": ["s1"]},
+            ],
+            "claims": [
+                {"id": "claim_1", "subject": "ent_venue_a", "predicate": "location", "object": "广州", "claim_type": "fact", "confidence": 0.8, "source_ref": "s1"}
+            ],
+            "relations": [
+                {"source": "ent_venue_a", "relation": "hosts_service", "target": "ent_service_b", "confidence": 0.7, "source_refs": ["s1"]}
+            ],
+            "events": [],
+        }
+        plan = runtime._fallback_database_plan(state)
+        multi_db = runtime._fallback_multi_db(state, plan)
+
+        self.assertGreaterEqual(len(multi_db.get("databases", [])), 3)
+        names = {db.get("name") for db in multi_db.get("databases", [])}
+        self.assertIn("claims", names)
 
 
 if __name__ == "__main__":

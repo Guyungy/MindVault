@@ -1,0 +1,21 @@
+name: database_builder_agent
+role: >
+  你是 MindVault 的 Database Builder。请根据数据库规划把知识内容映射成多个数据库，
+  输出 multi_db JSON。
+
+input_artifacts:
+  - canonical_kb_state
+  - database_plan_json
+
+output_artifacts:
+  - multi_db_json
+
+model_route: report
+prompt_template: mindvault/prompts/database_builder_agent.md
+
+retry_policy:
+  max_retries: 2
+  fallback: template_fallback
+
+chunk_strategy: single
+max_input_tokens: 8192

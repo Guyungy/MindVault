@@ -22,6 +22,7 @@ from mindvault.governance.placeholder_engine import PlaceholderEngine
 from mindvault.governance.schema_evolution import SchemaEvolutionEngine
 from mindvault.governance.memory_curator import MemoryCurator
 from mindvault.runtime.renderers.wiki import WikiExporter
+from mindvault.runtime.renderers.multi_db import MultiDBRenderer
 from parser import ParserAgent as RuleParserAgent
 
 
@@ -207,7 +208,13 @@ class VaultRuntime:
         dashboard_path = self._render_dashboard(state, governance, version_meta)
         self.trace.log("dashboard_complete")
 
-        # ── Step 14: Wiki export ────────────────────────────────────────────
+        # ── Step 14: Multi-DB export ────────────────────────────────────────
+        database_plan = self._generate_database_plan(state, governance)
+        multi_db = self._generate_multi_db(state, database_plan)
+        multi_db_paths = self._export_multi_db(database_plan, multi_db)
+        self.trace.log("multi_db_export_complete", data=multi_db_paths.get("data", ""))
+
+        # ── Step 15: Wiki export ────────────────────────────────────────────
         wiki_paths = self._export_wiki(state, governance, version_meta)
         self.trace.log("wiki_export_complete", index=wiki_paths.get("index", ""))
 
@@ -221,6 +228,7 @@ class VaultRuntime:
             "changelog": version_meta.get("changelog_path", ""),
             "report": str(self.ctx.report_path),
             "dashboard": dashboard_path,
+            "multi_db": multi_db_paths,
             "wiki": wiki_paths,
             "trace": str(self.ctx.root_dir / "agent_trace.json"),
             "stats": {
@@ -329,6 +337,40 @@ class VaultRuntime:
         wiki_payload = self._generate_wiki_payload(state, governance, version_meta)
         return exporter.export(state, governance, version_meta, wiki_payload=wiki_payload)
 
+    def _export_multi_db(self, database_plan: Dict[str, Any], multi_db: Dict[str, Any]) -> Dict[str, str]:
+        renderer = MultiDBRenderer(self.ctx.root_dir / "multi_db")
+        return renderer.render(database_plan, multi_db)
+
+    def _generate_database_plan(self, state, governance) -> Dict[str, Any]:
+        ontology_agent_path = Path("mindvault/agents/ontology_agent.yaml")
+        if ontology_agent_path.exists():
+            context = {
+                "entities": state.get("entities", []),
+                "claims": state.get("claims", []),
+                "relations": state.get("relations", []),
+                "events": state.get("events", []),
+                "governance": governance,
+            }
+            result = self.executor.execute(ontology_agent_path, context)
+            if isinstance(result, dict) and isinstance(result.get("databases"), list):
+                return result
+        return self._fallback_database_plan(state)
+
+    def _generate_multi_db(self, state, database_plan: Dict[str, Any]) -> Dict[str, Any]:
+        database_builder_agent_path = Path("mindvault/agents/database_builder_agent.yaml")
+        if database_builder_agent_path.exists():
+            context = {
+                "database_plan": database_plan,
+                "entities": state.get("entities", []),
+                "claims": state.get("claims", []),
+                "relations": state.get("relations", []),
+                "events": state.get("events", []),
+            }
+            result = self.executor.execute(database_builder_agent_path, context)
+            if isinstance(result, dict) and isinstance(result.get("databases"), list):
+                return result
+        return self._fallback_multi_db(state, database_plan)
+
     def _generate_wiki_payload(self, state, governance, version_meta) -> Dict[str, Any] | None:
         wiki_agent_path = Path("mindvault/agents/wiki_builder_agent.yaml")
         if not wiki_agent_path.exists():
@@ -346,6 +388,189 @@ class VaultRuntime:
         if isinstance(result, dict) and isinstance(result.get("pages"), list):
             return result
         return None
+
+    def _fallback_database_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        entity_types = sorted({entity.get("type", "unknown") for entity in state.get("entities", [])})
+        databases = []
+        if entity_types:
+            for entity_type in entity_types:
+                fields = {"id", "name", "type", "confidence", "source_refs"}
+                for entity in state.get("entities", []):
+                    if entity.get("type") == entity_type:
+                        fields.update(entity.get("attributes", {}).keys())
+                databases.append({
+                    "name": f"{entity_type}s",
+                    "title": entity_type,
+                    "description": f"Stores {entity_type} entities.",
+                    "entity_types": [entity_type],
+                    "suggested_fields": list(fields),
+                })
+        for name, title, desc in [
+            ("claims", "claims", "Atomic statements extracted from sources."),
+            ("relations", "relations", "Cross-record links."),
+            ("sources", "sources", "Source references and provenance."),
+        ]:
+            databases.append({
+                "name": name,
+                "title": title,
+                "description": desc,
+                "entity_types": [],
+                "suggested_fields": ["id"],
+            })
+        return {
+            "domain": "MindVault Multi-DB",
+            "generated_at": datetime.utcnow().isoformat(),
+            "databases": databases,
+            "relations": self._fallback_relation_defs(state, databases),
+        }
+
+    def _fallback_multi_db(self, state: Dict[str, Any], database_plan: Dict[str, Any]) -> Dict[str, Any]:
+        databases: List[Dict[str, Any]] = []
+        entities = state.get("entities", [])
+
+        for database in database_plan.get("databases", []):
+            name = database.get("name", "")
+            entity_types = set(database.get("entity_types", []))
+            if name == "claims":
+                rows = [self._flatten_claim_row(claim) for claim in state.get("claims", [])]
+            elif name == "relations":
+                rows = [self._flatten_relation_row(relation) for relation in state.get("relations", [])]
+            elif name == "sources":
+                rows = self._build_source_rows(state)
+            else:
+                rows = [
+                    self._flatten_entity_row(entity)
+                    for entity in entities
+                    if not entity_types or entity.get("type") in entity_types
+                ]
+            columns = self._collect_columns(rows)
+            databases.append({
+                "name": name,
+                "title": database.get("title", name),
+                "description": database.get("description", ""),
+                "primary_key": "id",
+                "columns": columns,
+                "rows": rows,
+            })
+
+        return {
+            "domain": database_plan.get("domain", "MindVault Multi-DB"),
+            "generated_at": datetime.utcnow().isoformat(),
+            "databases": databases,
+            "relations": self._fallback_relation_defs(state, database_plan.get("databases", [])),
+        }
+
+    def _fallback_relation_defs(self, state: Dict[str, Any], databases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        db_names = {db.get("name", "") for db in databases}
+        relation_defs = []
+        if "claims" in db_names:
+            relation_defs.append({
+                "from_db": "claims",
+                "from_field": "subject",
+                "to_db": "entities",
+                "to_field": "id",
+                "relation_type": "many_to_one",
+            })
+        if "relations" in db_names:
+            relation_defs.append({
+                "from_db": "relations",
+                "from_field": "source",
+                "to_db": "entities",
+                "to_field": "id",
+                "relation_type": "many_to_one",
+            })
+            relation_defs.append({
+                "from_db": "relations",
+                "from_field": "target",
+                "to_db": "entities",
+                "to_field": "id",
+                "relation_type": "many_to_one",
+            })
+        for relation in state.get("relations", []):
+            source_type = self._entity_type_for_id(state.get("entities", []), relation.get("source", ""))
+            target_type = self._entity_type_for_id(state.get("entities", []), relation.get("target", ""))
+            if source_type and target_type:
+                relation_defs.append({
+                    "from_db": f"{source_type}s",
+                    "from_field": "id",
+                    "to_db": f"{target_type}s",
+                    "to_field": "id",
+                    "relation_type": relation.get("relation", "linked_to"),
+                })
+        deduped = []
+        seen = set()
+        for row in relation_defs:
+            key = tuple(row.get(k, "") for k in ["from_db", "from_field", "to_db", "to_field", "relation_type"])
+            if key not in seen:
+                seen.add(key)
+                deduped.append(row)
+        return deduped
+
+    @staticmethod
+    def _flatten_entity_row(entity: Dict[str, Any]) -> Dict[str, Any]:
+        row = {
+            "id": entity.get("id", ""),
+            "name": entity.get("name", ""),
+            "type": entity.get("type", ""),
+            "confidence": entity.get("confidence", 0),
+            "source_refs": entity.get("source_refs", []),
+            "updated_at": entity.get("updated_at", ""),
+        }
+        row.update(entity.get("attributes", {}))
+        return row
+
+    @staticmethod
+    def _flatten_claim_row(claim: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": claim.get("id", claim.get("claim_id", "")),
+            "subject": claim.get("subject", ""),
+            "predicate": claim.get("predicate", ""),
+            "object": claim.get("object", ""),
+            "claim_type": claim.get("claim_type", ""),
+            "confidence": claim.get("confidence", 0),
+            "source_ref": claim.get("source_ref", ""),
+        }
+
+    @staticmethod
+    def _flatten_relation_row(relation: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": f"{relation.get('source', '')}:{relation.get('relation', '')}:{relation.get('target', '')}",
+            "source": relation.get("source", ""),
+            "relation": relation.get("relation", ""),
+            "target": relation.get("target", ""),
+            "confidence": relation.get("confidence", 0),
+            "source_refs": relation.get("source_refs", []),
+        }
+
+    @staticmethod
+    def _build_source_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        counts: Dict[str, int] = {}
+        for entity in state.get("entities", []):
+            for source_ref in entity.get("source_refs", []):
+                counts[source_ref] = counts.get(source_ref, 0) + 1
+        for claim in state.get("claims", []):
+            source_ref = claim.get("source_ref", "")
+            if source_ref:
+                counts[source_ref] = counts.get(source_ref, 0) + 1
+        return [{"id": source_ref, "name": source_ref, "mentions": count} for source_ref, count in sorted(counts.items())]
+
+    @staticmethod
+    def _collect_columns(rows: List[Dict[str, Any]]) -> List[str]:
+        columns: List[str] = []
+        seen = set()
+        for row in rows:
+            for key in row.keys():
+                if key not in seen:
+                    seen.add(key)
+                    columns.append(key)
+        return columns or ["id"]
+
+    @staticmethod
+    def _entity_type_for_id(entities: List[Dict[str, Any]], entity_id: str) -> str:
+        for entity in entities:
+            if entity.get("id") == entity_id:
+                return entity.get("type", "")
+        return ""
 
     def _fallback_parse_chunk(self, chunk) -> Dict[str, Any]:
         docs = [{
