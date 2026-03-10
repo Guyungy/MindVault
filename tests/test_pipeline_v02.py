@@ -101,6 +101,32 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertIn("b.txt", source_ids)
         self.assertIn("json_one", source_ids)
 
+    def test_json_loader_preserves_context_hints_and_metadata(self):
+        input_dir = self.workspace_path / "inputs"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        (input_dir / "c.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "source_id": "json_one",
+                        "source_type": "doc",
+                        "content": "gamma",
+                        "metadata": {"origin": "webui"},
+                        "context_hints": {"target_db": "services", "note": "manual"},
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        sources = load_sources_from_path(input_dir / "c.json")
+
+        self.assertEqual(sources[0]["context_hints"]["target_db"], "services")
+        self.assertEqual(sources[0]["context_hints"]["note"], "manual")
+        self.assertEqual(sources[0]["metadata"]["origin"], "webui")
+        self.assertEqual(sources[0]["metadata"]["filename"], "c.json")
+
     def test_runtime_fallback_parser_extracts_entities(self):
         runtime = VaultRuntime(self.workspace)
         chunk = NormalizedChunk(
@@ -136,6 +162,10 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertGreaterEqual(len(multi_db.get("databases", [])), 3)
         names = {db.get("name") for db in multi_db.get("databases", [])}
         self.assertIn("claims", names)
+        visibility = {db.get("name"): db.get("visibility") for db in plan.get("databases", [])}
+        self.assertEqual(visibility["claims"], "system")
+        self.assertEqual(visibility["relations"], "system")
+        self.assertEqual(visibility["sources"], "system")
 
     def test_task_runtime_persists_state_and_steps(self):
         task_root = self.workspace_path / "tasks"
@@ -171,6 +201,22 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(summary["health"], "stale")
         self.assertEqual(summary["recent_fallbacks"], 1)
         self.assertEqual(summary["recent_failures"], 1)
+
+    def test_task_monitor_uses_recent_step_activity_for_running_task(self):
+        task = {
+            "status": "running",
+            "last_heartbeat": "2026-03-10T00:00:00",
+        }
+        summary = summarize_task(
+            task,
+            recent_steps=[
+                {"status": "fallback", "timestamp": "2026-03-10T00:10:00"},
+                {"status": "ok", "timestamp": "2026-03-10T23:59:30"},
+            ],
+        )
+
+        self.assertEqual(summary["health"], "healthy")
+        self.assertFalse(summary["is_stale"])
 
 
 if __name__ == "__main__":

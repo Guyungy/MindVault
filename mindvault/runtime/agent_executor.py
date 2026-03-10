@@ -68,6 +68,7 @@ class AgentExecutor:
             agent=agent_name,
             task_type=model_route,
             has_error="error" in result,
+            error=result.get("error", ""),
             output_keys=list(parsed.keys()) if isinstance(parsed, dict) else [],
         )
 

@@ -50,8 +50,12 @@ class TaskRuntime:
         self._save()
 
     def log_step(self, action: str, status: str, **extra: Any) -> None:
+        timestamp = datetime.utcnow().isoformat()
+        if self.state.get("status") == "running":
+            self.state["last_heartbeat"] = timestamp
+            self._save()
         entry = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": timestamp,
             "task_id": self.task_id,
             "action": action,
             "status": status,

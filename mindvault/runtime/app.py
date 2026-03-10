@@ -395,8 +395,8 @@ class VaultRuntime:
             }
             result = self.executor.execute(ontology_agent_path, context)
             if isinstance(result, dict) and isinstance(result.get("databases"), list):
-                return result
-        return self._fallback_database_plan(state)
+                return self._finalize_database_plan(result)
+        return self._finalize_database_plan(self._fallback_database_plan(state))
 
     def _generate_multi_db(self, state, database_plan: Dict[str, Any]) -> Dict[str, Any]:
         database_builder_agent_path = Path("mindvault/agents/database_builder_agent.yaml")
@@ -410,8 +410,8 @@ class VaultRuntime:
             }
             result = self.executor.execute(database_builder_agent_path, context)
             if isinstance(result, dict) and isinstance(result.get("databases"), list):
-                return result
-        return self._fallback_multi_db(state, database_plan)
+                return self._finalize_multi_db(result, database_plan)
+        return self._finalize_multi_db(self._fallback_multi_db(state, database_plan), database_plan)
 
     def _generate_wiki_payload(self, state, governance, version_meta) -> Dict[str, Any] | None:
         wiki_agent_path = Path("mindvault/agents/wiki_builder_agent.yaml")
@@ -446,6 +446,7 @@ class VaultRuntime:
                     "description": f"Stores {entity_type} entities.",
                     "entity_types": [entity_type],
                     "suggested_fields": list(fields),
+                    "visibility": "business",
                 })
         for name, title, desc in [
             ("claims", "claims", "Atomic statements extracted from sources."),
@@ -458,6 +459,7 @@ class VaultRuntime:
                 "description": desc,
                 "entity_types": [],
                 "suggested_fields": ["id"],
+                "visibility": "system",
             })
         return {
             "domain": "MindVault Multi-DB",
@@ -490,6 +492,7 @@ class VaultRuntime:
                 "name": name,
                 "title": database.get("title", name),
                 "description": database.get("description", ""),
+                "visibility": database.get("visibility", self._infer_database_visibility(name)),
                 "primary_key": "id",
                 "columns": columns,
                 "rows": rows,
@@ -501,6 +504,31 @@ class VaultRuntime:
             "databases": databases,
             "relations": self._fallback_relation_defs(state, database_plan.get("databases", [])),
         }
+
+    def _finalize_database_plan(self, database_plan: Dict[str, Any]) -> Dict[str, Any]:
+        plan = dict(database_plan)
+        normalized = []
+        for database in plan.get("databases", []):
+            row = dict(database)
+            name = row.get("name", "")
+            row.setdefault("visibility", self._infer_database_visibility(name))
+            normalized.append(row)
+        plan["databases"] = normalized
+        return plan
+
+    def _finalize_multi_db(self, multi_db: Dict[str, Any], database_plan: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(multi_db)
+        plan_map = {database.get("name", ""): database for database in database_plan.get("databases", [])}
+        normalized = []
+        for database in payload.get("databases", []):
+            row = dict(database)
+            plan_row = plan_map.get(row.get("name", ""), {})
+            row.setdefault("title", plan_row.get("title", row.get("name", "")))
+            row.setdefault("description", plan_row.get("description", ""))
+            row.setdefault("visibility", plan_row.get("visibility", self._infer_database_visibility(row.get("name", ""))))
+            normalized.append(row)
+        payload["databases"] = normalized
+        return payload
 
     def _fallback_relation_defs(self, state: Dict[str, Any], databases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         db_names = {db.get("name", "") for db in databases}
@@ -613,6 +641,10 @@ class VaultRuntime:
             if entity.get("id") == entity_id:
                 return entity.get("type", "")
         return ""
+
+    @staticmethod
+    def _infer_database_visibility(name: str) -> str:
+        return "system" if name in {"claims", "relations", "sources"} else "business"
 
     def _fallback_parse_chunk(self, chunk) -> Dict[str, Any]:
         docs = [{
@@ -757,15 +789,17 @@ def _load_single_input_file(path: Path) -> List[Dict[str, Any]]:
 def _normalize_json_source(item: Dict[str, Any], path: Path) -> Dict[str, Any]:
     if not isinstance(item, dict):
         raise ValueError(f"Unsupported JSON item in {path}: expected object.")
+    metadata = {
+        **item.get("metadata", {}),
+        "filename": path.name,
+        "relative_path": str(path),
+    }
     return {
         "source_id": item.get("source", item.get("source_id", path.stem)),
         "source_type": item.get("source_type", "doc"),
         "content": item.get("text", item.get("content", "")),
-        "metadata": {
-            **item.get("metadata", {}),
-            "filename": path.name,
-            "relative_path": str(path),
-        },
+        "metadata": metadata,
+        "context_hints": dict(item.get("context_hints", {})),
     }
 
 

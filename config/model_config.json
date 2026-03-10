@@ -1,17 +1,17 @@
 {
   "providers": {
-    "gpt54_model": {
+    "gpt52_model": {
       "base_url": "https://xnuffwyczfry.ap-northeast-1.clawcloudrun.com/v1",
       "api_key": "sk-xCpyTCYXi9wC47hoOsCa13O6PgBw",
-      "model": "gpt-5.4",
-      "timeout_seconds": 120,
-      "max_retries": 2,
+      "model": "gpt-5.2",
+      "timeout_seconds": 180,
+      "max_retries": 3,
       "retry_backoff_seconds": 1.0
     }
   },
   "routing": {
-    "parse": "gpt54_model",
-    "insight": "gpt54_model",
-    "report": "gpt54_model"
+    "parse": "gpt52_model",
+    "insight": "gpt52_model",
+    "report": "gpt52_model"
   }
 }
