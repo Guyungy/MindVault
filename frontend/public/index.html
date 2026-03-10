@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div id="error-banner" class="error-banner hidden"></div>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -30,6 +31,14 @@
           <div class="section-title">Relations</div>
           <div id="relation-list" class="relation-list"></div>
         </div>
+        <nav class="sidebar-section">
+          <div class="section-title">Views</div>
+          <div class="nav-list">
+            <button class="nav-btn active" data-view="databases">Databases</button>
+            <button class="nav-btn" data-view="tasks">Tasks</button>
+            <button class="nav-btn" data-view="agents">Agents</button>
+          </div>
+        </nav>
       </aside>
 
       <main class="main">
@@ -48,32 +57,90 @@
           <div id="database-tabs" class="tabs"></div>
         </section>
 
-        <section class="content-grid">
-          <div class="table-panel card">
-            <div class="panel-head">
-              <div>
-                <h3 id="table-title">Database</h3>
-                <p id="table-meta" class="muted"></p>
+        <section id="view-databases" class="view-panel">
+          <section class="content-grid">
+            <div class="table-panel card">
+              <div class="panel-head">
+                <div>
+                  <h3 id="table-title">Database</h3>
+                  <p id="table-meta" class="muted"></p>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table id="database-table"></table>
               </div>
             </div>
-            <div class="table-wrap">
-              <table id="database-table"></table>
-            </div>
-          </div>
 
-          <div class="detail-panel card">
-            <div class="panel-head">
-              <div>
-                <h3>Row Detail</h3>
-                <p class="muted">点击任意行查看完整字段。</p>
+            <div class="detail-panel card">
+              <div class="panel-head">
+                <div>
+                  <h3>Row Detail</h3>
+                  <p class="muted">点击任意行查看完整字段。</p>
+                </div>
               </div>
+              <pre id="row-detail" class="row-detail">No row selected.</pre>
             </div>
-            <pre id="row-detail" class="row-detail">No row selected.</pre>
-          </div>
+          </section>
+        </section>
+
+        <section id="view-tasks" class="view-panel hidden">
+          <section class="task-grid">
+            <div class="card">
+              <div class="panel-head">
+                <div>
+                  <h3>Tasks</h3>
+                  <p class="muted">当前 workspace 的任务运行列表。</p>
+                </div>
+              </div>
+              <div id="task-list" class="task-list"></div>
+            </div>
+
+            <div class="card">
+              <div class="panel-head">
+                <div>
+                  <h3>Task Detail</h3>
+                  <p class="muted">显示选中任务的关键步骤与恢复提示。</p>
+                </div>
+              </div>
+              <div id="task-detail" class="task-detail-empty muted">No task selected.</div>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-agents" class="view-panel hidden">
+          <section class="agent-grid">
+            <div class="card">
+              <div class="panel-head">
+                <div>
+                  <h3>Agent Timeline</h3>
+                  <p class="muted">按运行顺序查看 agent 与关键事件。</p>
+                </div>
+              </div>
+              <div id="agent-list" class="agent-list"></div>
+            </div>
+
+            <div class="card">
+              <div class="panel-head">
+                <div>
+                  <h3>Agent Detail</h3>
+                  <p class="muted">显示选中事件的完整上下文。</p>
+                </div>
+              </div>
+              <pre id="agent-detail" class="row-detail">No agent event selected.</pre>
+            </div>
+          </section>
         </section>
       </main>
     </div>
 
-    <script type="module" src="/app.js"></script>
+    <script>
+      window.addEventListener("error", (event) => {
+        const node = document.getElementById("error-banner");
+        if (!node) return;
+        node.textContent = `Frontend error: ${event.message}`;
+        node.classList.remove("hidden");
+      });
+    </script>
+    <script type="module" src="/app.js?v=20260310-3"></script>
   </body>
   </html>

@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
-const publicDir = path.join(__dirname, "public");
+const distDir = path.join(__dirname, "dist");
+const publicDir = existsSync(distDir) ? distDir : path.join(__dirname, "public");
 const workspacesDir = path.join(rootDir, "output", "workspaces");
 const port = Number(process.env.PORT || 4310);
 const host = process.env.HOST || "127.0.0.1";
@@ -21,6 +22,14 @@ const mimeTypes = {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
+
+  if (url.pathname === "/health") {
+    return sendJson(res, {
+      ok: true,
+      service: "mindvault-frontend",
+      time: new Date().toISOString(),
+    });
+  }
 
   if (url.pathname === "/api/workspaces") {
     return sendJson(res, await listWorkspaces());
@@ -70,7 +79,8 @@ async function readWorkspacePayload(workspaceId) {
   const multiDbPath = path.join(workspaceRoot, "multi_db", "multi_db.json");
   const planPath = path.join(workspaceRoot, "multi_db", "database_plan.json");
   const tracePath = path.join(workspaceRoot, "agent_trace.json");
-  const latestTask = await readLatestTask(path.join(workspaceRoot, "tasks"));
+  const tasks = await readTasks(path.join(workspaceRoot, "tasks"));
+  const latestTask = tasks[0] || null;
 
   if (!existsSync(workspaceRoot)) {
     return { error: `Workspace not found: ${workspaceId}` };
@@ -87,22 +97,41 @@ async function readWorkspacePayload(workspaceId) {
     multiDb,
     databasePlan: plan,
     trace,
+    tasks,
     latestTask,
   };
 }
 
-async function readLatestTask(taskDir) {
-  if (!existsSync(taskDir)) return null;
+async function readTasks(taskDir) {
+  if (!existsSync(taskDir)) return [];
   const names = (await readdir(taskDir)).sort().reverse();
+  const tasks = [];
   for (const name of names) {
     const absolute = path.join(taskDir, name);
     const meta = await safeStat(absolute);
     if (!meta?.isDirectory()) continue;
     const taskPath = path.join(absolute, "task.json");
     const task = await readJsonSafe(taskPath, null);
-    if (task) return task;
+    const stepLogPath = path.join(absolute, "step_log.jsonl");
+    const recentSteps = await readStepLogTail(stepLogPath, 6);
+    if (task) tasks.push({ ...task, recentSteps, monitor: summarizeTask(task, recentSteps) });
   }
-  return null;
+  return tasks;
+}
+
+async function readStepLogTail(stepLogPath, maxItems) {
+  if (!existsSync(stepLogPath)) return [];
+  try {
+    const raw = await readFile(stepLogPath, "utf-8");
+    return raw
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .slice(-maxItems)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
 }
 
 async function serveStatic(urlPath, res) {
@@ -113,12 +142,13 @@ async function serveStatic(urlPath, res) {
   }
 
   if (!existsSync(filePath)) {
+    if (existsSync(path.join(publicDir, "index.html"))) {
+      return streamFile(path.join(publicDir, "index.html"), res);
+    }
     return sendText(res, "Not found", 404);
   }
 
-  const ext = path.extname(filePath);
-  res.writeHead(200, { "Content-Type": mimeTypes[ext] || "application/octet-stream" });
-  createReadStream(filePath).pipe(res);
+  return streamFile(filePath, res);
 }
 
 async function readJsonSafe(filePath, fallback) {
@@ -140,11 +170,58 @@ async function safeStat(target) {
 }
 
 function sendJson(res, payload, status = 200) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store, max-age=0",
+  });
   res.end(JSON.stringify(payload));
 }
 
 function sendText(res, text, status = 200) {
-  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+  res.writeHead(status, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store, max-age=0",
+  });
   res.end(text);
+}
+
+function streamFile(filePath, res) {
+  const ext = path.extname(filePath);
+  res.writeHead(200, {
+    "Content-Type": mimeTypes[ext] || "application/octet-stream",
+    "Cache-Control": "no-store, max-age=0",
+  });
+  createReadStream(filePath).pipe(res);
+}
+
+function summarizeTask(task, recentSteps) {
+  const heartbeatAgeSeconds = getHeartbeatAgeSeconds(task.last_heartbeat);
+  const isStale = task.status === "running" && heartbeatAgeSeconds !== null && heartbeatAgeSeconds > 300;
+  const recentFallbacks = recentSteps.filter((step) => step.status === "fallback").length;
+  const recentFailures = recentSteps.filter((step) => step.status === "failed").length;
+
+  let health = "healthy";
+  if (isStale) {
+    health = "stale";
+  } else if (["completed", "failed", "blocked", "paused"].includes(task.status)) {
+    health = task.status;
+  } else if (recentFailures > 0) {
+    health = "degraded";
+  }
+
+  return {
+    health,
+    heartbeat_age_seconds: heartbeatAgeSeconds,
+    is_stale: isStale,
+    recent_fallbacks: recentFallbacks,
+    recent_failures: recentFailures,
+    step_count: recentSteps.length,
+  };
+}
+
+function getHeartbeatAgeSeconds(value) {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return null;
+  return Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
 }

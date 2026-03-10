@@ -5,8 +5,10 @@ import unittest
 
 from main import run_pipeline
 from mindvault.runtime.app import VaultRuntime, load_sources_from_path
+from mindvault.runtime.bash_runner import BashRunner
 from mindvault.runtime.renderers.wiki import WikiExporter
 from mindvault.runtime.models import NormalizedChunk
+from mindvault.runtime.task_monitor import summarize_task
 from mindvault.runtime.task_runtime import TaskRuntime
 
 
@@ -149,6 +151,26 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(task_json["status"], "completed")
         self.assertEqual(task_json["current_step"], "parse")
         self.assertGreaterEqual(len(step_log), 1)
+
+    def test_bash_runner_captures_stdout_and_exit_code(self):
+        runner = BashRunner(self.workspace_path / "stdout")
+        result = runner.run("printf 'hello'", timeout_seconds=5, cwd=self.workspace_path)
+
+        self.assertEqual(result["exit_code"], 0)
+        self.assertFalse(result["timed_out"])
+        self.assertTrue(Path(result["stdout_path"]).exists())
+        self.assertIn("hello", Path(result["stdout_path"]).read_text(encoding="utf-8"))
+
+    def test_task_monitor_detects_stale_running_task(self):
+        task = {
+            "status": "running",
+            "last_heartbeat": "2026-03-10T00:00:00",
+        }
+        summary = summarize_task(task, recent_steps=[{"status": "fallback"}, {"status": "failed"}])
+
+        self.assertEqual(summary["health"], "stale")
+        self.assertEqual(summary["recent_fallbacks"], 1)
+        self.assertEqual(summary["recent_failures"], 1)
 
 
 if __name__ == "__main__":
