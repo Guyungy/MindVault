@@ -55,6 +55,13 @@ class RuntimeResilienceTests(unittest.TestCase):
         self.assertIsInstance(parsed, dict)
         self.assertIn("entity_candidates", parsed)
 
+    def test_agent_executor_repairs_truncated_json_payload(self):
+        payload = "{\"claims\": [{\"claim_id\": \"c1\"}], \"entity_candidates\": ["
+        parsed = AgentExecutor._try_parse_json(payload)
+        self.assertIsInstance(parsed, dict)
+        self.assertEqual(parsed.get("claims", [{}])[0].get("claim_id"), "c1")
+        self.assertEqual(parsed.get("entity_candidates"), [])
+
     def test_agent_retry_policy_is_forwarded_to_client(self):
         fake_client = _FakeClient()
         executor = AgentExecutor(_FakeRouter(fake_client), TraceLogger())
@@ -186,6 +193,22 @@ class RuntimeResilienceTests(unittest.TestCase):
             ]
         }
         self.assertEqual(LLMClient._extract_content("responses", result), "{\"claims\": []}")
+
+    def test_llm_client_concatenates_multiple_responses_segments(self):
+        result = {
+            "output": [
+                {
+                    "content": [
+                        {"type": "output_text", "text": "{\"claims\": ["},
+                        {"type": "output_text", "text": "], \"entity_candidates\": []}"},
+                    ]
+                }
+            ]
+        }
+        self.assertEqual(
+            LLMClient._extract_content("responses", result),
+            "{\"claims\": [], \"entity_candidates\": []}",
+        )
 
     def test_llm_client_sets_json_response_format_for_chat_completions_when_enabled(self):
         client = LLMClient(

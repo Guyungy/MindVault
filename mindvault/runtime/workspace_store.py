@@ -24,6 +24,7 @@ class WorkspaceContext:
     config_dir: Path
     wiki_dir: Path
     task_dir: Path
+    graph_dir: Path
     # ── Convenience paths ──
     kb_path: Path
     report_path: Path
@@ -51,6 +52,7 @@ class WorkspaceStore:
             "config": root / "config",
             "wiki": root / "wiki",
             "tasks": root / "tasks",
+            "graph": root / "graph",
         }
         for d in [root, *dirs.values()]:
             d.mkdir(parents=True, exist_ok=True)
@@ -68,6 +70,7 @@ class WorkspaceStore:
             config_dir=dirs["config"],
             wiki_dir=dirs["wiki"],
             task_dir=dirs["tasks"],
+            graph_dir=dirs["graph"],
             kb_path=dirs["canonical"] / "knowledge_base.json",
             report_path=dirs["reports"] / "report.json",
         )

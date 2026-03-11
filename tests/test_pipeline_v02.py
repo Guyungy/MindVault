@@ -339,6 +339,31 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(len(insights), 1)
         self.assertEqual(insights[0]["title"], "结构概览")
 
+    def test_run_pipeline_snapshots_task_artifacts(self):
+        with mock.patch("mindvault.runtime.agent_executor.AgentExecutor.execute", side_effect=self._mock_llm_execute):
+            result = run_pipeline(workspace=self.workspace, sample_path="sample_data/benchmarks/semi_structured.json")
+
+        task_json_path = Path(result["task"]["task_json"])
+        task_data = json.loads(task_json_path.read_text(encoding="utf-8"))
+        artifacts = task_data.get("artifacts", {})
+
+        self.assertIn("task_input_sources", artifacts)
+        self.assertIn("task_extracted", artifacts)
+        self.assertIn("task_database_plan", artifacts)
+        self.assertIn("task_multi_db_data", artifacts)
+        self.assertIn("task_graph", artifacts)
+        self.assertIn("task_current_ingest_graph", artifacts)
+
+        for key in (
+            "task_input_sources",
+            "task_extracted",
+            "task_database_plan",
+            "task_multi_db_data",
+            "task_graph",
+            "task_current_ingest_graph",
+        ):
+            self.assertTrue(Path(artifacts[key]).exists(), key)
+
     def test_generate_database_plan_accepts_wrapped_plan_shape(self):
         runtime = VaultRuntime(self.workspace)
         runtime.executor.execute = mock.Mock(
@@ -625,6 +650,28 @@ class MindVaultV02Tests(unittest.TestCase):
 
         self.assertTrue(runtime._should_reuse_database_plan(existing_plan, change_scope, runtime_settings))
 
+    def test_should_not_reuse_database_plan_when_semantic_mode_changes(self):
+        runtime = VaultRuntime(self.workspace)
+        existing_plan = {
+            "databases": [
+                {"name": "persons", "entity_types": ["person"], "row_source": "entities"},
+                {"name": "products", "entity_types": ["product"], "row_source": "entities"},
+            ],
+            "relations": [],
+        }
+        change_scope = {
+            "entity_types": ["person", "product"],
+            "claim_count": 5,
+            "relation_count": 2,
+            "event_count": 1,
+            "semantic_tags": ["discussion_heavy", "conversation", "discourse_graph", "opinionated"],
+        }
+        runtime_settings = {
+            "planning": {"reuse_existing_plan": True},
+        }
+
+        self.assertFalse(runtime._should_reuse_database_plan(existing_plan, change_scope, runtime_settings))
+
     def test_should_not_reuse_database_plan_when_new_types_appear(self):
         runtime = VaultRuntime(self.workspace)
         existing_plan = {
@@ -731,6 +778,131 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(multi_db["databases"][0]["name"], "persons")
         self.assertEqual(multi_db["databases"][0]["rows"][0]["name"], "Alice")
         self.assertEqual(multi_db["databases"][0]["rows"][0]["role"], "admin")
+
+    def test_build_graph_payload_creates_nodes_and_edges_from_state(self):
+        runtime = VaultRuntime(self.workspace)
+        state = {
+            "entities": [
+                {
+                    "id": "ent_person_alice",
+                    "name": "Alice",
+                    "type": "person",
+                    "attributes": {"role": "host"},
+                    "source_refs": ["src_1"],
+                },
+                {
+                    "id": "ent_product_claw",
+                    "name": "OpenClaw",
+                    "type": "product",
+                    "attributes": {"category": "tool"},
+                    "source_refs": ["src_1"],
+                },
+            ],
+            "claims": [
+                {
+                    "id": "claim_1",
+                    "subject": "ent_person_alice",
+                    "predicate": "mentions",
+                    "object": "ent_product_claw",
+                    "source_ref": "src_1",
+                    "source_refs": ["src_1"],
+                }
+            ],
+            "relations": [
+                {
+                    "source": "ent_person_alice",
+                    "relation": "uses",
+                    "target": "ent_product_claw",
+                    "source_refs": ["src_1"],
+                }
+            ],
+            "events": [
+                {
+                    "id": "evt_1",
+                    "type": "discussion",
+                    "description": "Alice discussed OpenClaw",
+                    "participants": ["ent_person_alice"],
+                    "source_refs": ["src_1"],
+                }
+            ],
+        }
+
+        graph = runtime._build_graph_payload(state)
+
+        self.assertEqual(graph["metadata"]["node_count"], 3)
+        self.assertTrue(all("type" in node and "table" in node and "name" in node for node in graph["nodes"]))
+        self.assertTrue(all("type" in edge and "label" in edge for edge in graph["edges"]))
+        edge_relations = {edge["relation"] for edge in graph["edges"]}
+        self.assertIn("uses", edge_relations)
+        self.assertIn("mentions", edge_relations)
+        self.assertIn("participates_in", edge_relations)
+
+    def test_build_direct_database_generates_discussion_rows(self):
+        runtime = VaultRuntime(self.workspace)
+        state = {
+            "entities": [
+                {"id": "ent_person_alice", "name": "Alice", "type": "person", "attributes": {}, "source_refs": ["src_1"]},
+                {"id": "ent_product_clawhub", "name": "ClawHub", "type": "product", "attributes": {}, "source_refs": ["src_1"]},
+            ],
+            "claims": [
+                {
+                    "id": "claim_1",
+                    "subject": "Alice",
+                    "predicate": "认为",
+                    "object": "ClawHub",
+                    "claim_type": "opinion",
+                    "claim_text": "Alice 认为 ClawHub 很方便",
+                    "confidence": 0.8,
+                    "source_ref": "src_1",
+                    "source_refs": ["src_1"],
+                }
+            ],
+            "relations": [
+                {
+                    "source": "ent_person_alice",
+                    "target": "ent_product_clawhub",
+                    "relation": "uses",
+                    "evidence": "Alice 在使用 ClawHub",
+                    "confidence": 0.9,
+                    "source_refs": ["src_1"],
+                }
+            ],
+            "events": [],
+        }
+        database_spec = {
+            "name": "technical_discussions",
+            "title": "技术讨论记录表",
+            "row_source": "mixed",
+            "record_granularity": "discussion",
+            "suggested_fields": ["discussion_topic", "participant_id", "content_summary"],
+        }
+
+        payload = runtime._build_direct_database(state, database_spec)
+
+        self.assertGreater(len(payload["rows"]), 0)
+        self.assertIn("discussion_topic", payload["columns"])
+        self.assertIn("participant_id", payload["columns"])
+
+    def test_filter_graph_by_source_ids_returns_current_ingest_scope(self):
+        runtime = VaultRuntime(self.workspace)
+        graph = {
+            "nodes": [
+                {"id": "ent_person_alice", "label": "Alice", "source_refs": ["src_1"], "table_name": "persons"},
+                {"id": "ent_product_claw", "label": "OpenClaw", "source_refs": ["src_2"], "table_name": "products"},
+                {"id": "lit_topic", "label": "话题", "source_refs": ["src_1"], "table_name": "concepts"},
+            ],
+            "edges": [
+                {"id": "e1", "source": "ent_person_alice", "target": "lit_topic", "relation": "mentions", "source_refs": ["src_1"]},
+                {"id": "e2", "source": "ent_person_alice", "target": "ent_product_claw", "relation": "uses", "source_refs": ["src_2"]},
+            ],
+            "metadata": {},
+        }
+
+        scoped = runtime._filter_graph_by_source_ids(graph, {"src_1"})
+
+        self.assertEqual({node["id"] for node in scoped["nodes"]}, {"ent_person_alice", "lit_topic"})
+        self.assertEqual(len(scoped["edges"]), 1)
+        self.assertEqual(scoped["metadata"]["scope"], "current_ingest")
 
     def test_generate_multi_db_keeps_partial_success_when_one_table_fails(self):
         runtime = VaultRuntime(self.workspace)
@@ -868,7 +1040,7 @@ class MindVaultV02Tests(unittest.TestCase):
                             "title": "活动摘要",
                             "entity_types": [],
                             "row_source": "mixed",
-                            "record_granularity": "discussion",
+                            "record_granularity": "summary",
                             "suggested_fields": ["id", "summary", "venue_id", "topic"],
                             "visibility": "business",
                         }

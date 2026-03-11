@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -114,6 +115,8 @@ class VaultRuntime:
             self.trace.log("ingest_complete", source_count=len(sources))
             task.log_step("ingest", "ok", sources=len(sources), output=str(raw_path))
             task.add_artifact("sources", str(raw_path))
+            self._write_task_input_sources(task, sources)
+            self._snapshot_task_artifact(task, "sources", raw_path)
 
             self._mark_task(task, "adapt", resume_hint="Adapting sources into normalized chunks.")
             all_chunks = []
@@ -167,6 +170,7 @@ class VaultRuntime:
 
             extracted_path = self._save_extracted(all_claims, all_entities, all_relations, all_events)
             task.add_artifact("extracted", str(extracted_path))
+            self._snapshot_task_artifact(task, "extracted", extracted_path)
 
             self._mark_task(task, "confidence", resume_hint="Scoring and annotating extracted knowledge.")
             for claim in all_claims:
@@ -202,6 +206,7 @@ class VaultRuntime:
             state = self.kb.merge(fragment)
             self.trace.log("merge_complete")
             task.add_artifact("knowledge_base", str(self.ctx.kb_path))
+            self._snapshot_task_artifact(task, "knowledge_base", self.ctx.kb_path)
             task.log_step("merge", "ok", entities=len(state.get("entities", [])))
 
             self._mark_task(task, "governance", agent="governance", resume_hint="Auditing conflicts and placeholders.")
@@ -214,6 +219,7 @@ class VaultRuntime:
             ph_path.write_text(json.dumps(ph_records, indent=2, ensure_ascii=False), encoding="utf-8")
             self.trace.log("placeholder_scan_complete", count=len(ph_records))
             task.add_artifact("placeholders", str(ph_path))
+            self._snapshot_task_artifact(task, "placeholders", ph_path)
             task.log_step("governance", "ok", conflicts=conflict_result.get("unresolved_count", 0), placeholders=len(ph_records))
 
             self._mark_task(task, "versioning", agent="version_store", resume_hint="Snapshotting canonical state.")
@@ -227,7 +233,20 @@ class VaultRuntime:
             self.trace.log("version_snapshot_complete", version=version_meta["version"])
             task.add_artifact("snapshot", version_meta.get("snapshot_path", ""))
             task.add_artifact("changelog", version_meta.get("changelog_path", ""))
+            self._snapshot_task_artifact(task, "snapshot", version_meta.get("snapshot_path", ""))
+            self._snapshot_task_artifact(task, "changelog", version_meta.get("changelog_path", ""))
             task.log_step("versioning", "ok", version=version_meta.get("version"))
+
+            current_source_ids = [
+                str(src.get("source_id", "")).strip()
+                for src in sources
+                if str(src.get("source_id", "")).strip()
+            ]
+            graph_paths = self._export_graph_artifacts(state, current_source_ids)
+            self.trace.log("graph_export_complete", graph=graph_paths.get("graph", ""))
+            for name, value in graph_paths.items():
+                task.add_artifact(name, value)
+                self._snapshot_task_artifact(task, name, value)
 
             insights: List[Dict[str, Any]] = []
             report_path = ""
@@ -250,6 +269,7 @@ class VaultRuntime:
             database_plan, plan_reused = self._resolve_database_plan(state, governance, change_scope, runtime_settings, task=task)
             database_plan_path = self._write_database_plan(database_plan)
             task.add_artifact("database_plan", str(database_plan_path))
+            self._snapshot_task_artifact(task, "database_plan", database_plan_path)
             task.log_step(
                 "database_plan",
                 "ok",
@@ -269,6 +289,7 @@ class VaultRuntime:
             self.trace.log("multi_db_export_complete", data=multi_db_paths.get("data", ""))
             for name, value in multi_db_paths.items():
                 task.add_artifact(f"multi_db_{name}", value)
+                self._snapshot_task_artifact(task, f"multi_db_{name}", value)
             task.log_step(
                 "multi_db",
                 "ok",
@@ -292,6 +313,7 @@ class VaultRuntime:
             trace_path = self.ctx.root_dir / "agent_trace.json"
             self.trace.save(trace_path)
             task.add_artifact("trace", str(trace_path))
+            self._snapshot_task_artifact(task, "trace", trace_path)
             if optional_failures:
                 task.state["warnings"] = optional_failures
                 task.complete("Pipeline completed with warnings.")
@@ -312,6 +334,7 @@ class VaultRuntime:
                 "changelog": version_meta.get("changelog_path", ""),
                 "report": report_path or "",
                 "multi_db": multi_db_paths,
+                "graph": graph_paths,
                 "trace": str(trace_path),
                 "warnings": optional_failures,
                 "stats": {
@@ -497,6 +520,32 @@ class VaultRuntime:
                 chat_like += 1
         return chat_like >= 4
 
+    def _task_artifacts_dir(self, task: TaskRuntime) -> Path:
+        path = task.task_dir / "artifacts"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _write_task_input_sources(self, task: TaskRuntime, sources: List[Dict[str, Any]]) -> str:
+        artifact_dir = self._task_artifacts_dir(task)
+        path = artifact_dir / "input_sources.json"
+        path.write_text(json.dumps(sources, indent=2, ensure_ascii=False), encoding="utf-8")
+        task.add_artifact("task_input_sources", str(path))
+        return str(path)
+
+    def _snapshot_task_artifact(self, task: TaskRuntime | None, name: str, source_path: str | Path | None) -> str:
+        if task is None or not source_path:
+            return ""
+        src = Path(source_path)
+        if not src.exists():
+            return ""
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name)).strip("._") or "artifact"
+        suffix = src.suffix or ".json"
+        artifact_dir = self._task_artifacts_dir(task)
+        dest = artifact_dir / f"{safe_name}{suffix}"
+        shutil.copy2(src, dest)
+        task.add_artifact(f"task_{safe_name}", str(dest))
+        return str(dest)
+
     def _save_extracted(self, claims, entities, relations, events) -> Path:
         existing = sorted(self.ctx.extracted_dir.glob("extracted_v*.json"))
         version = len(existing) + 1
@@ -583,6 +632,21 @@ class VaultRuntime:
         renderer = MultiDBRenderer(self.ctx.root_dir / "multi_db")
         return renderer.render(database_plan, multi_db, include_html=False)
 
+    def _export_graph_artifacts(self, state: Dict[str, Any], current_source_ids: List[str]) -> Dict[str, str]:
+        self.ctx.graph_dir.mkdir(parents=True, exist_ok=True)
+        graph_path = self.ctx.graph_dir / "graph.json"
+        current_path = self.ctx.graph_dir / "current_ingest.json"
+
+        graph_payload = self._build_graph_payload(state)
+        current_payload = self._filter_graph_by_source_ids(graph_payload, set(current_source_ids))
+
+        graph_path.write_text(json.dumps(graph_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        current_path.write_text(json.dumps(current_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return {
+            "graph": str(graph_path),
+            "current_ingest_graph": str(current_path),
+        }
+
     def _load_existing_multi_db(self) -> Dict[str, Any]:
         path = self.ctx.root_dir / "multi_db" / "multi_db.json"
         if not path.exists():
@@ -639,7 +703,64 @@ class VaultRuntime:
             "relation_count": len(relations),
             "event_count": len(events),
             "source_refs": sorted(source_refs),
+            "semantic_tags": self._extract_semantic_tags(entities, claims, relations, events),
         }
+
+    @staticmethod
+    def _extract_semantic_tags(
+        entities: List[Dict[str, Any]],
+        claims: List[Dict[str, Any]],
+        relations: List[Dict[str, Any]],
+        events: List[Dict[str, Any]],
+    ) -> List[str]:
+        tags: set[str] = set()
+        entity_types = {
+            str(item.get("type", "")).strip().lower()
+            for item in entities
+            if str(item.get("type", "")).strip()
+        }
+        claim_types = {
+            str(item.get("claim_type", "")).strip().lower()
+            for item in claims
+            if str(item.get("claim_type", "")).strip()
+        }
+        predicates = {
+            str(item.get("predicate", "")).strip().lower()
+            for item in claims
+            if str(item.get("predicate", "")).strip()
+        }
+        event_types = {
+            str(item.get("type", "")).strip().lower()
+            for item in events
+            if str(item.get("type", "")).strip()
+        }
+        relation_types = {
+            str(item.get("relation", item.get("relation_type", ""))).strip().lower()
+            for item in relations
+            if str(item.get("relation", item.get("relation_type", ""))).strip()
+        }
+
+        for value_set, label in (
+            (entity_types, "typed_entities"),
+            (claim_types, "typed_claims"),
+            (predicates, "predicates"),
+            (event_types, "typed_events"),
+            (relation_types, "typed_relations"),
+        ):
+            if value_set:
+                tags.add(label)
+
+        if {"topic", "opinion", "signal", "role", "resource"} & entity_types:
+            tags.add("discourse_graph")
+        if {"opinion", "judgment", "subjective"} & claim_types:
+            tags.add("opinionated")
+        if {"discusses", "mentions", "thinks", "suggests", "believes", "认为", "提到", "建议"} & predicates:
+            tags.add("discussion_heavy")
+        if {"discussion", "conversation", "chat"} & event_types:
+            tags.add("conversation")
+        if any("topic" in predicate or "话题" in predicate for predicate in predicates):
+            tags.add("topic_focused")
+        return sorted(tags)
 
     @staticmethod
     def _collect_planned_entity_types(database_plan: Dict[str, Any]) -> set[str]:
@@ -650,6 +771,30 @@ class VaultRuntime:
                 if normalized:
                     planned_types.add(normalized)
         return planned_types
+
+    @staticmethod
+    def _collect_plan_semantic_tags(database_plan: Dict[str, Any]) -> set[str]:
+        tags: set[str] = set()
+        for database in database_plan.get("databases", []) or []:
+            name = str(database.get("name", "")).strip().lower()
+            title = str(database.get("title", "")).strip().lower()
+            row_source = str(database.get("row_source", "")).strip().lower()
+            record_granularity = str(database.get("record_granularity", "")).strip().lower()
+            entity_types = {
+                str(item).strip().lower()
+                for item in (database.get("entity_types", []) or [])
+                if str(item).strip()
+            }
+            joined = " ".join([name, title, row_source, record_granularity, " ".join(sorted(entity_types))])
+            if any(token in joined for token in ["topic", "话题", "discussion", "讨论", "opinion", "观点", "signal", "信号"]):
+                tags.add("discourse_graph")
+            if any(token in joined for token in ["opinion", "观点"]):
+                tags.add("opinionated")
+            if any(token in joined for token in ["discussion", "chat", "conversation", "讨论", "对话"]):
+                tags.add("conversation")
+            if any(token in joined for token in ["topic", "话题"]):
+                tags.add("topic_focused")
+        return tags
 
     def _should_reuse_database_plan(
         self,
@@ -671,7 +816,21 @@ class VaultRuntime:
         planned_types = self._collect_planned_entity_types(existing_plan)
         if not planned_types:
             return False
-        return changed_types.issubset(planned_types)
+        if not changed_types.issubset(planned_types):
+            return False
+
+        changed_tags = {
+            str(item).strip()
+            for item in change_scope.get("semantic_tags", [])
+            if str(item).strip()
+        }
+        if not changed_tags:
+            return True
+        planned_tags = self._collect_plan_semantic_tags(existing_plan)
+        semantic_gap = {"discourse_graph", "opinionated", "conversation", "topic_focused"} & changed_tags
+        if semantic_gap and not semantic_gap.issubset(planned_tags):
+            return False
+        return True
 
     def _resolve_database_plan(
         self,
@@ -933,11 +1092,18 @@ class VaultRuntime:
     def _can_build_direct_database(database_spec: Dict[str, Any]) -> bool:
         row_source = str(database_spec.get("row_source", "mixed") or "mixed").strip().lower()
         name = str(database_spec.get("name", "")).strip().lower()
-        return row_source in {"entities", "claims", "relations", "events"} or name == "sources"
+        record_granularity = str(database_spec.get("record_granularity", "") or "").strip().lower()
+        return (
+            row_source in {"entities", "claims", "relations", "events"}
+            or name == "sources"
+            or record_granularity == "discussion"
+            or "discussion" in name
+        )
 
     def _build_direct_database(self, state: Dict[str, Any], database_spec: Dict[str, Any]) -> Dict[str, Any]:
         row_source = str(database_spec.get("row_source", "mixed") or "mixed").strip().lower()
         name = str(database_spec.get("name", "")).strip()
+        record_granularity = str(database_spec.get("record_granularity", "") or "").strip().lower()
 
         if row_source == "entities":
             rows = self._build_entity_table_rows(state, database_spec)
@@ -949,6 +1115,8 @@ class VaultRuntime:
             rows = self._build_event_table_rows(state)
         elif name.lower() == "sources":
             rows = self._build_source_table_rows(state)
+        elif record_granularity == "discussion" or "discussion" in name.lower():
+            rows = self._build_discussion_table_rows(state)
         else:
             rows = []
 
@@ -1078,6 +1246,398 @@ class VaultRuntime:
             for source_ref in event.get("source_refs", []) or []:
                 touch_source(str(source_ref), "event")
         return list(source_map.values())
+
+    def _build_discussion_table_rows(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        entity_by_id = {
+            str(entity.get("id", entity.get("entity_id", ""))).strip(): entity
+            for entity in state.get("entities", [])
+            if str(entity.get("id", entity.get("entity_id", ""))).strip()
+        }
+        entity_name_index = {
+            str(entity.get("name", "")).strip().lower(): entity
+            for entity in state.get("entities", [])
+            if str(entity.get("name", "")).strip()
+        }
+
+        rows: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        def entity_from_token(token: Any) -> Dict[str, Any] | None:
+            if token is None:
+                return None
+            text = str(token).strip()
+            if not text:
+                return None
+            if text in entity_by_id:
+                return entity_by_id[text]
+            return entity_name_index.get(text.lower())
+
+        def add_row(row: Dict[str, Any]) -> None:
+            row_id = str(row.get("id", "")).strip()
+            if not row_id or row_id in seen_ids:
+                return
+            seen_ids.add(row_id)
+            rows.append(row)
+
+        for relation in state.get("relations", []):
+            source_id = str(relation.get("source", relation.get("source_entity", "")) or "").strip()
+            target_id = str(relation.get("target", relation.get("target_entity", "")) or "").strip()
+            relation_type = str(relation.get("relation", relation.get("relation_type", "")) or "related_to").strip() or "related_to"
+            source_entity = entity_by_id.get(source_id)
+            target_entity = entity_by_id.get(target_id)
+            evidence = str(relation.get("evidence", "") or "").strip()
+            source_refs = relation.get("source_refs", []) or []
+            target_type = str((target_entity or {}).get("type", "")).strip().lower()
+
+            add_row(
+                {
+                    "id": str(relation.get("id", "")) or f"{source_id}:{relation_type}:{target_id}",
+                    "discussion_topic": (target_entity or {}).get("name", "") or relation_type,
+                    "participant_id": source_id,
+                    "participant_name": (source_entity or {}).get("name", "") or source_id,
+                    "related_node_id": target_id,
+                    "related_node_name": (target_entity or {}).get("name", "") or target_id,
+                    "product_id": target_id if target_type == "product" else "",
+                    "organization_id": target_id if target_type == "organization" else "",
+                    "opinion_type": relation_type,
+                    "content_summary": evidence or f"{(source_entity or {}).get('name', source_id)} {relation_type} {(target_entity or {}).get('name', target_id)}",
+                    "confidence_level": relation.get("confidence"),
+                    "source_ref": source_refs[0] if source_refs else "",
+                    "source_refs": source_refs,
+                    "discussion_date": relation.get("updated_at", ""),
+                    "sentiment": self._infer_discussion_sentiment(relation_type, evidence),
+                    "technical_focus": (target_entity or {}).get("name", "") if target_type in {"product", "organization", "service"} else "",
+                }
+            )
+
+        for claim in state.get("claims", []):
+            claim_id = str(claim.get("id", claim.get("claim_id", "")) or "").strip()
+            subject = claim.get("subject", "")
+            predicate = str(claim.get("predicate", "") or claim.get("claim_type", "") or "statement").strip() or "statement"
+            obj = claim.get("object")
+            subject_entity = entity_from_token(subject)
+            object_entity = entity_from_token(obj) if not isinstance(obj, list) else None
+            source_refs = claim.get("source_refs", []) or ([claim.get("source_ref")] if claim.get("source_ref") else [])
+            discussion_topic = ""
+            if object_entity and object_entity.get("name"):
+                discussion_topic = str(object_entity.get("name", ""))
+            elif subject_entity and subject_entity.get("name"):
+                discussion_topic = str(subject_entity.get("name", ""))
+            else:
+                discussion_topic = str(obj if obj not in (None, "", []) else subject).strip() or predicate
+            target_type = str((object_entity or {}).get("type", "")).strip().lower()
+            add_row(
+                {
+                    "id": claim_id or f"claim_discussion:{hashlib.sha1(str(claim).encode('utf-8')).hexdigest()[:12]}",
+                    "discussion_topic": discussion_topic,
+                    "participant_id": str((subject_entity or {}).get("id", "")),
+                    "participant_name": str((subject_entity or {}).get("name", "")),
+                    "related_node_id": str((object_entity or {}).get("id", "")),
+                    "related_node_name": str((object_entity or {}).get("name", "")) or ("" if isinstance(obj, list) else str(obj or "")),
+                    "product_id": str((object_entity or {}).get("id", "")) if target_type == "product" else "",
+                    "organization_id": str((object_entity or {}).get("id", "")) if target_type == "organization" else "",
+                    "opinion_type": str(claim.get("claim_type", "")) or predicate,
+                    "content_summary": str(claim.get("claim_text", "") or f"{subject} {predicate} {obj}").strip(),
+                    "confidence_level": claim.get("confidence"),
+                    "source_ref": claim.get("source_ref", "") or (source_refs[0] if source_refs else ""),
+                    "source_refs": source_refs,
+                    "discussion_date": claim.get("updated_at", ""),
+                    "sentiment": self._infer_discussion_sentiment(str(claim.get("claim_type", "")) or predicate, str(claim.get("claim_text", "") or "")),
+                    "technical_focus": discussion_topic,
+                }
+            )
+
+        return rows
+
+    @staticmethod
+    def _infer_discussion_sentiment(opinion_type: str, content: str) -> str:
+        text = f"{opinion_type} {content}".lower()
+        positive_markers = ("recommend", "use", "support", "promote", "good", "方便", "欢迎", "优化", "支持")
+        negative_markers = ("issue", "problem", "fail", "error", "useless", "没用", "用不了", "风险", "bug", "超时")
+        if any(marker in text for marker in negative_markers):
+            return "negative"
+        if any(marker in text for marker in positive_markers):
+            return "positive"
+        return "neutral"
+
+    def _build_graph_payload(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        nodes: Dict[str, Dict[str, Any]] = {}
+        edges: List[Dict[str, Any]] = []
+        name_index: Dict[str, str] = {}
+
+        def register_node(node: Dict[str, Any]) -> None:
+            node_id = str(node.get("id", "")).strip()
+            if not node_id:
+                return
+            existing = nodes.get(node_id)
+            if existing:
+                existing_sources = set(existing.get("source_refs", []) or [])
+                existing_sources.update(node.get("source_refs", []) or [])
+                existing["source_refs"] = sorted(existing_sources)
+                attributes = dict(existing.get("attributes", {}) or {})
+                attributes.update(node.get("attributes", {}) or {})
+                existing["attributes"] = attributes
+                if not existing.get("label") and node.get("label"):
+                    existing["label"] = node["label"]
+                return
+            normalized = {
+                "id": node_id,
+                "name": str(node.get("label", "") or node_id),
+                "label": str(node.get("label", "") or node_id),
+                "type": str(node.get("category", "") or "concept"),
+                "kind": str(node.get("kind", "") or "entity"),
+                "category": str(node.get("category", "") or "concept"),
+                "table": str(node.get("table_name", "") or "concepts"),
+                "table_name": str(node.get("table_name", "") or "concepts"),
+                "source_refs": sorted({str(item) for item in (node.get("source_refs", []) or []) if str(item).strip()}),
+                "attributes": dict(node.get("attributes", {}) or {}),
+            }
+            nodes[node_id] = normalized
+            lowered = normalized["label"].strip().lower()
+            if lowered and lowered not in name_index:
+                name_index[lowered] = node_id
+
+        def resolve_value_to_node(value: Any, *, claim: Dict[str, Any] | None = None, fallback_prefix: str = "literal") -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (int, float, bool)):
+                literal_value = str(value)
+            else:
+                literal_value = str(value).strip()
+            if not literal_value:
+                return ""
+            if literal_value in nodes:
+                return literal_value
+            if literal_value.lower() in name_index:
+                return name_index[literal_value.lower()]
+
+            literal_id = f"lit_{hashlib.sha1(f'{fallback_prefix}:{literal_value}'.encode('utf-8')).hexdigest()[:16]}"
+            register_node(
+                {
+                    "id": literal_id,
+                    "label": literal_value,
+                    "kind": "literal",
+                    "category": fallback_prefix,
+                    "table_name": "concepts",
+                    "source_refs": (claim or {}).get("source_refs", []) or ([claim.get("source_ref")] if claim and claim.get("source_ref") else []),
+                    "attributes": {
+                        "value": literal_value,
+                    },
+                }
+            )
+            return literal_id
+
+        for entity in state.get("entities", []):
+            entity_id = str(entity.get("id", entity.get("entity_id", ""))).strip()
+            if not entity_id:
+                continue
+            entity_type = str(entity.get("type", "") or "entity").strip() or "entity"
+            attributes = dict(entity.get("attributes", {}) or {})
+            for key in ("confidence", "status", "updated_at"):
+                if entity.get(key) not in (None, "", []):
+                    attributes.setdefault(key, entity.get(key))
+            register_node(
+                {
+                    "id": entity_id,
+                    "label": str(entity.get("name", "") or entity_id),
+                    "kind": "entity",
+                    "category": entity_type,
+                    "table_name": self._default_table_name_for_entity_type(entity_type),
+                    "source_refs": entity.get("source_refs", []) or [],
+                    "attributes": attributes,
+                }
+            )
+
+        for event in state.get("events", []):
+            event_id = str(event.get("id", event.get("event_id", ""))).strip()
+            if not event_id:
+                continue
+            event_type = str(event.get("type", "") or "event").strip() or "event"
+            attributes = dict(event.get("attributes", {}) or {})
+            for key in ("description", "timestamp", "confidence", "status", "updated_at"):
+                if event.get(key) not in (None, "", []):
+                    attributes.setdefault(key, event.get(key))
+            register_node(
+                {
+                    "id": event_id,
+                    "label": str(event.get("description", "") or event_type),
+                    "kind": "event",
+                    "category": event_type,
+                    "table_name": "events",
+                    "source_refs": event.get("source_refs", []) or [],
+                    "attributes": attributes,
+                }
+            )
+            for participant in event.get("participants", []) or []:
+                source_id = resolve_value_to_node(participant, claim={"source_refs": event.get("source_refs", []) or []}, fallback_prefix="participant")
+                if not source_id:
+                    continue
+                edges.append(
+                    {
+                        "id": f"{source_id}:participates_in:{event_id}",
+                        "source": source_id,
+                        "target": event_id,
+                        "type": "participates_in",
+                        "label": "participates_in",
+                        "relation": "participates_in",
+                        "kind": "event_participation",
+                        "source_refs": event.get("source_refs", []) or [],
+                        "confidence": event.get("confidence"),
+                    }
+                )
+
+        for relation in state.get("relations", []):
+            source_id = resolve_value_to_node(relation.get("source", relation.get("source_entity", "")), claim=relation, fallback_prefix="relation_source")
+            target_id = resolve_value_to_node(relation.get("target", relation.get("target_entity", "")), claim=relation, fallback_prefix="relation_target")
+            if not source_id or not target_id:
+                continue
+            relation_type = str(relation.get("relation", relation.get("relation_type", "")) or "related_to").strip() or "related_to"
+            edges.append(
+                {
+                    "id": f"{source_id}:{relation_type}:{target_id}",
+                    "source": source_id,
+                    "target": target_id,
+                    "type": relation_type,
+                    "label": relation_type,
+                    "relation": relation_type,
+                    "kind": "relation",
+                    "source_refs": relation.get("source_refs", []) or [],
+                    "confidence": relation.get("confidence"),
+                }
+            )
+
+        for claim in state.get("claims", []):
+            predicate = str(claim.get("predicate", claim.get("claim_type", "")) or "claims").strip() or "claims"
+            subject_id = resolve_value_to_node(claim.get("subject", ""), claim=claim, fallback_prefix="claim_subject")
+            objects = claim.get("object")
+            targets = objects if isinstance(objects, list) else [objects]
+            for target in targets:
+                target_id = resolve_value_to_node(target, claim=claim, fallback_prefix="claim_object")
+                if not subject_id or not target_id:
+                    continue
+                edges.append(
+                    {
+                        "id": f"{subject_id}:{predicate}:{target_id}",
+                        "source": subject_id,
+                        "target": target_id,
+                        "type": predicate,
+                        "label": predicate,
+                        "relation": predicate,
+                        "kind": "claim",
+                        "source_refs": claim.get("source_refs", []) or ([claim.get("source_ref")] if claim.get("source_ref") else []),
+                        "confidence": claim.get("confidence"),
+                    }
+                )
+
+        deduped_edges: List[Dict[str, Any]] = []
+        seen_edges: set[str] = set()
+        for edge in edges:
+            edge_id = str(edge.get("id", "")).strip()
+            if not edge_id or edge_id in seen_edges:
+                continue
+            seen_edges.add(edge_id)
+            deduped_edges.append(edge)
+
+        return {
+            "generated_at": datetime.utcnow().isoformat(),
+            "domain": self._guess_graph_domain(state),
+            "nodes": sorted(nodes.values(), key=lambda item: (str(item.get("table_name", "")), str(item.get("label", "")))),
+            "edges": deduped_edges,
+            "metadata": {
+                "node_count": len(nodes),
+                "edge_count": len(deduped_edges),
+                "entity_count": len(state.get("entities", [])),
+                "event_count": len(state.get("events", [])),
+                "claim_count": len(state.get("claims", [])),
+                "relation_count": len(state.get("relations", [])),
+            },
+        }
+
+    @staticmethod
+    def _guess_graph_domain(state: Dict[str, Any]) -> str:
+        types: Dict[str, int] = {}
+        for entity in state.get("entities", []):
+            entity_type = str(entity.get("type", "") or "entity").strip() or "entity"
+            types[entity_type] = types.get(entity_type, 0) + 1
+        if not types:
+            return "全景关系图"
+        top_types = sorted(types.items(), key=lambda item: (-item[1], item[0]))[:3]
+        return " / ".join(item[0] for item in top_types)
+
+    @staticmethod
+    def _default_table_name_for_entity_type(entity_type: str) -> str:
+        normalized = str(entity_type or "entity").strip().lower()
+        mapping = {
+            "person": "persons",
+            "people": "persons",
+            "organization": "organizations",
+            "company": "organizations",
+            "product": "products",
+            "service": "services",
+            "venue": "venues",
+            "area": "areas",
+            "event": "events",
+            "topic": "topics",
+            "opinion": "opinions",
+            "signal": "signals",
+            "resource": "resources",
+            "project": "projects",
+            "role": "roles",
+        }
+        return mapping.get(normalized, f"{normalized}s" if not normalized.endswith("s") else normalized)
+
+    def _filter_graph_by_source_ids(self, graph_payload: Dict[str, Any], source_ids: set[str]) -> Dict[str, Any]:
+        if not source_ids:
+            return {
+                **graph_payload,
+                "nodes": [],
+                "edges": [],
+                "metadata": {
+                    **dict(graph_payload.get("metadata", {}) or {}),
+                    "scope": "current_ingest",
+                    "source_ids": [],
+                    "node_count": 0,
+                    "edge_count": 0,
+                },
+            }
+
+        touched_node_ids = {
+            str(node.get("id", "")).strip()
+            for node in graph_payload.get("nodes", [])
+            if set(str(item) for item in (node.get("source_refs", []) or [])).intersection(source_ids)
+        }
+        touched_edges = []
+        for edge in graph_payload.get("edges", []):
+            edge_sources = {str(item) for item in (edge.get("source_refs", []) or []) if str(item).strip()}
+            if edge_sources.intersection(source_ids):
+                touched_edges.append(edge)
+                touched_node_ids.add(str(edge.get("source", "")).strip())
+                touched_node_ids.add(str(edge.get("target", "")).strip())
+
+        nodes = [
+            node
+            for node in graph_payload.get("nodes", [])
+            if str(node.get("id", "")).strip() in touched_node_ids
+        ]
+        node_id_set = {str(node.get("id", "")).strip() for node in nodes}
+        edges = [
+            edge
+            for edge in touched_edges
+            if str(edge.get("source", "")).strip() in node_id_set and str(edge.get("target", "")).strip() in node_id_set
+        ]
+        return {
+            "generated_at": graph_payload.get("generated_at", ""),
+            "domain": graph_payload.get("domain", ""),
+            "nodes": nodes,
+            "edges": edges,
+            "metadata": {
+                **dict(graph_payload.get("metadata", {}) or {}),
+                "scope": "current_ingest",
+                "source_ids": sorted(source_ids),
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+            },
+        }
 
     def _build_single_database_payloads(
         self,
@@ -1767,6 +2327,7 @@ class VaultRuntime:
                 row.setdefault("record_granularity", "mixed")
             normalized.append(row)
         plan["databases"] = normalized
+        plan.setdefault("semantic_tags", sorted(self._collect_plan_semantic_tags(plan)))
         return plan
 
     def _finalize_multi_db(self, multi_db: Dict[str, Any], database_plan: Dict[str, Any]) -> Dict[str, Any]:

@@ -240,7 +240,7 @@ class AgentExecutor:
 
     @staticmethod
     def _try_parse_json(content: str) -> Any:
-        text = (content or "").strip()
+        text = (content or "").strip().lstrip("\ufeff")
         if not text:
             return text
 
@@ -259,25 +259,92 @@ class AgentExecutor:
             except json.JSONDecodeError:
                 continue
 
-        for opener, closer in (("{", "}"), ("[", "]")):
-            start = text.find(opener)
-            if start == -1:
-                continue
-            depth = 0
-            for idx in range(start, len(text)):
-                ch = text[idx]
-                if ch == opener:
-                    depth += 1
-                elif ch == closer:
-                    depth -= 1
-                    if depth == 0:
-                        snippet = text[start:idx + 1]
-                        try:
-                            return json.loads(snippet)
-                        except json.JSONDecodeError:
-                            break
+        extracted = AgentExecutor._extract_balanced_json_snippet(text)
+        if extracted:
+            try:
+                return json.loads(extracted)
+            except json.JSONDecodeError:
+                pass
+
+        repaired = AgentExecutor._repair_truncated_json(text)
+        if repaired:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
 
         return text
+
+    @staticmethod
+    def _extract_balanced_json_snippet(text: str) -> str:
+        candidates = [(idx, "{", "}") for idx in [text.find("{")] if idx != -1]
+        candidates += [(idx, "[", "]") for idx in [text.find("[")] if idx != -1]
+        if not candidates:
+            return ""
+        start, opener, closer = min(candidates, key=lambda item: item[0])
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    return text[start:idx + 1]
+        return ""
+
+    @staticmethod
+    def _repair_truncated_json(text: str) -> str:
+        start_positions = [idx for idx in (text.find("{"), text.find("[")) if idx != -1]
+        if not start_positions:
+            return ""
+        start = min(start_positions)
+        snippet = text[start:].strip()
+        if not snippet:
+            return ""
+
+        stack: List[str] = []
+        in_string = False
+        escaped = False
+        collected: List[str] = []
+
+        for ch in snippet:
+            collected.append(ch)
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                stack.append("}")
+            elif ch == "[":
+                stack.append("]")
+            elif ch in {"}", "]"} and stack and ch == stack[-1]:
+                stack.pop()
+
+        repaired = "".join(collected)
+        if in_string:
+            repaired += '"'
+        while stack:
+            repaired += stack.pop()
+        return repaired
 
     @staticmethod
     def _parse_scalar(raw: str) -> Any:

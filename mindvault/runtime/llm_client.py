@@ -139,11 +139,14 @@ class LLMClient:
         if protocol == "responses":
             if isinstance(result.get("output_text"), str) and result.get("output_text"):
                 return result["output_text"]
+            if isinstance(result.get("output_text"), list) and result.get("output_text"):
+                return "".join(str(item) for item in result["output_text"] if item)
             output = result.get("output", [])
+            collected = []
             for item in output:
                 for content in item.get("content", []):
                     text = content.get("text")
                     if text:
-                        return text
-            return ""
+                        collected.append(text)
+            return "".join(collected)
         return result.get("choices", [{}])[0].get("message", {}).get("content", "")

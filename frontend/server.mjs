@@ -206,6 +206,7 @@ async function handleWorkspaceCreate(req, res) {
       path.join(workspaceRoot, "wiki"),
       path.join(workspaceRoot, "tasks"),
       path.join(workspaceRoot, "multi_db"),
+      path.join(workspaceRoot, "graph"),
     ];
     for (const dir of dirs) {
       await mkdir(dir, { recursive: true });
@@ -221,6 +222,16 @@ async function handleWorkspaceCreate(req, res) {
     await writeFile(
       path.join(workspaceRoot, "multi_db", "multi_db.json"),
       JSON.stringify({ domain: "", databases: [], relations: [] }, null, 2),
+      "utf-8",
+    );
+    await writeFile(
+      path.join(workspaceRoot, "graph", "graph.json"),
+      JSON.stringify({ domain: "", nodes: [], edges: [], metadata: {} }, null, 2),
+      "utf-8",
+    );
+    await writeFile(
+      path.join(workspaceRoot, "graph", "current_ingest.json"),
+      JSON.stringify({ domain: "", nodes: [], edges: [], metadata: { scope: "current_ingest", source_ids: [] } }, null, 2),
       "utf-8",
     );
 
@@ -640,6 +651,8 @@ async function readWorkspacePayload(workspaceId) {
   const workspaceRoot = path.join(workspacesDir, workspaceId);
   const multiDbPath = path.join(workspaceRoot, "multi_db", "multi_db.json");
   const planPath = path.join(workspaceRoot, "multi_db", "database_plan.json");
+  const graphPath = path.join(workspaceRoot, "graph", "graph.json");
+  const currentIngestGraphPath = path.join(workspaceRoot, "graph", "current_ingest.json");
   const tracePath = path.join(workspaceRoot, "agent_trace.json");
   const rawSourcesPath = path.join(workspaceRoot, "raw", "sources.json");
 
@@ -647,9 +660,11 @@ async function readWorkspacePayload(workspaceId) {
     return { error: `Workspace not found: ${workspaceId}` };
   }
 
-  const [multiDb, plan, trace, rawSources, tasks, queue] = await Promise.all([
+  const [multiDb, plan, graph, currentIngestGraph, trace, rawSources, tasks, queue] = await Promise.all([
     readJsonSafe(multiDbPath, { databases: [], relations: [] }),
     readJsonSafe(planPath, { databases: [], relations: [] }),
+    readJsonSafe(graphPath, { domain: "", nodes: [], edges: [], metadata: {} }),
+    readJsonSafe(currentIngestGraphPath, { domain: "", nodes: [], edges: [], metadata: {} }),
     readJsonSafe(tracePath, []),
     readJsonSafe(rawSourcesPath, []),
     readTasks(path.join(workspaceRoot, "tasks")),
@@ -660,7 +675,7 @@ async function readWorkspacePayload(workspaceId) {
   const recentSources = Array.isArray(rawSources) ? rawSources.slice(-8).reverse() : [];
   const tasksWithImpact = tasks.map((task) => ({
     ...task,
-    impact: summarizeTaskImpact(task, rawSources, normalizedMultiDb),
+    impact: summarizeTaskImpact(task, rawSources, normalizedMultiDb, graph),
   }));
   const queuedTasks = buildQueuedTasks(queue);
   const mergedTasks = [...tasksWithImpact, ...queuedTasks].sort((left, right) => {
@@ -673,6 +688,8 @@ async function readWorkspacePayload(workspaceId) {
     tables: normalizedMultiDb.databases || [],
     multiDb: normalizedMultiDb,
     databasePlan: normalizedPlan,
+    graph,
+    currentIngestGraph,
     trace,
     tasks: mergedTasks,
     latestTask,
@@ -1192,7 +1209,7 @@ function parseTaskTimestamp(value) {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-function summarizeTaskImpact(task, rawSources, multiDb) {
+function summarizeTaskImpact(task, rawSources, multiDb, graph) {
   const sourceIds = collectTaskSourceIds(task, rawSources);
   const sourceIdSet = new Set(sourceIds);
   const databases = (multiDb?.databases || [])
@@ -1208,10 +1225,17 @@ function summarizeTaskImpact(task, rawSources, multiDb) {
     })
     .filter(Boolean);
 
+  const graphScope = filterGraphBySourceIds(graph, sourceIds);
+
   return {
     source_count: sourceIds.length,
     source_ids: sourceIds,
     databases,
+    graph: {
+      node_count: (graphScope?.nodes || []).length,
+      edge_count: (graphScope?.edges || []).length,
+      sample_nodes: (graphScope?.nodes || []).slice(0, 5).map((node) => node.label || node.id || "未命名节点"),
+    },
   };
 }
 
@@ -1262,6 +1286,40 @@ function rowTouchesSources(row, databaseName, sourceIdSet) {
   if (sourceIdSet.has(row.source_ref)) return true;
   if (Array.isArray(row.source_refs) && row.source_refs.some((item) => sourceIdSet.has(item))) return true;
   return false;
+}
+
+function filterGraphBySourceIds(graph, sourceIds) {
+  const sourceIdSet = new Set((sourceIds || []).filter(Boolean));
+  const safeGraph = graph && typeof graph === "object" ? graph : { nodes: [], edges: [] };
+  if (!sourceIdSet.size) {
+    return { ...safeGraph, nodes: [], edges: [] };
+  }
+  const touchedNodeIds = new Set(
+    (safeGraph.nodes || [])
+      .filter((node) => (node.source_refs || []).some((item) => sourceIdSet.has(item)))
+      .map((node) => node.id),
+  );
+  const edges = (safeGraph.edges || []).filter((edge) => {
+    const hit = (edge.source_refs || []).some((item) => sourceIdSet.has(item));
+    if (hit) {
+      touchedNodeIds.add(edge.source);
+      touchedNodeIds.add(edge.target);
+    }
+    return hit;
+  });
+  const nodes = (safeGraph.nodes || []).filter((node) => touchedNodeIds.has(node.id));
+  return {
+    ...safeGraph,
+    nodes,
+    edges,
+    metadata: {
+      ...(safeGraph.metadata || {}),
+      scope: "current_ingest",
+      source_ids: [...sourceIdSet],
+      node_count: nodes.length,
+      edge_count: edges.length,
+    },
+  };
 }
 
 async function handleIngest(req, res, workspaceId) {

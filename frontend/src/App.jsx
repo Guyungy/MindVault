@@ -779,6 +779,8 @@ function AppShell() {
                   completedTasks={completedTasks}
                   staleTasks={staleTasks}
                   trace={trace}
+                  graph={payload?.graph}
+                  currentIngestGraph={payload?.currentIngestGraph}
                 />
               ) : null}
 
@@ -820,6 +822,8 @@ function AppShell() {
                   workspaceId={payload?.workspace || workspaceId}
                   tables={businessTables}
                   recentSources={recentSources}
+                  graph={payload?.graph}
+                  currentIngestGraph={payload?.currentIngestGraph}
                 />
               ) : null}
 
@@ -838,6 +842,7 @@ function AppShell() {
                     setActiveView("tables");
                   }}
                   deleteStatus={taskDeleteStatus}
+                  currentIngestGraph={payload?.currentIngestGraph}
                 />
               ) : null}
 
@@ -1167,14 +1172,28 @@ function TablesView({
   );
 }
 
-function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
+function NodeWorkspaceView({ workspaceId, tables, recentSources, graph, currentIngestGraph }) {
   const [nodeQuery, setNodeQuery] = useState("");
   const [tableFilter, setTableFilter] = useState("all");
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [graphMode, setGraphMode] = useState("lane");
+  const [scopeMode, setScopeMode] = useState("current");
   const referenceMap = useMemo(() => buildReferenceMap(tables), [tables]);
+  const hasCurrentIngestGraph = Boolean((currentIngestGraph?.nodes || []).length);
+  const activeGraphPayload = scopeMode === "current" && hasCurrentIngestGraph ? currentIngestGraph : graph;
+  const graphNodes = useMemo(() => normalizeGraphNodes(activeGraphPayload), [activeGraphPayload]);
+  const useGraphPayload = graphNodes.length > 0;
+
+  useEffect(() => {
+    if (!hasCurrentIngestGraph && scopeMode === "current") {
+      setScopeMode("all");
+    }
+  }, [hasCurrentIngestGraph, scopeMode]);
 
   const allNodes = useMemo(() => {
+    if (useGraphPayload) {
+      return graphNodes;
+    }
     const items = [];
     for (const table of tables || []) {
       for (const row of table.rows || []) {
@@ -1191,7 +1210,7 @@ function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
       }
     }
     return items;
-  }, [tables, referenceMap]);
+  }, [graphNodes, tables, referenceMap, useGraphPayload]);
 
   const filteredNodes = useMemo(() => {
     const normalized = nodeQuery.trim().toLowerCase();
@@ -1210,7 +1229,22 @@ function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
     });
   }, [allNodes, tableFilter, nodeQuery]);
 
-  const graphEdges = useMemo(() => buildWorkspaceEdges(filteredNodes, tables, referenceMap), [filteredNodes, tables, referenceMap]);
+  const availableTableOptions = useMemo(() => {
+    const map = new Map();
+    for (const node of allNodes) {
+      if (!map.has(node.tableName)) {
+        map.set(node.tableName, node.tableTitle || formatTableTitle({ name: node.tableName }));
+      }
+    }
+    return [...map.entries()].map(([value, label]) => ({ value, label }));
+  }, [allNodes]);
+
+  const graphEdges = useMemo(() => {
+    if (useGraphPayload) {
+      return buildWorkspaceEdgesFromGraph(activeGraphPayload, filteredNodes);
+    }
+    return buildWorkspaceEdges(filteredNodes, tables, referenceMap);
+  }, [activeGraphPayload, filteredNodes, tables, referenceMap, useGraphPayload]);
 
   const selectedNode =
     filteredNodes.find((node) => node.id === selectedNodeId) ||
@@ -1225,9 +1259,16 @@ function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
   }, [filteredNodes, selectedNode]);
 
   const selectedConnections = selectedNode
-    ? buildRowConnections(selectedNode.row, selectedNode.table, tables, referenceMap)
+    ? useGraphPayload
+      ? buildGraphConnections(selectedNode, activeGraphPayload)
+      : buildRowConnections(selectedNode.row, selectedNode.table, tables, referenceMap)
     : [];
-  const selectedSources = selectedNode ? buildRowSourceSnippets(selectedNode.row, recentSources) : [];
+  const selectedSources = selectedNode
+    ? useGraphPayload
+      ? buildGraphSourceSnippets(selectedNode, recentSources)
+      : buildRowSourceSnippets(selectedNode.row, recentSources)
+    : [];
+  const profileSections = useMemo(() => buildNodeProfileSections(selectedNode, referenceMap), [selectedNode, referenceMap]);
   const nodeTableColumns = [
     {
       accessorKey: "label",
@@ -1259,15 +1300,23 @@ function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
         <CardContent className="space-y-3">
           <Select value={tableFilter} onChange={(event) => setTableFilter(event.target.value)}>
             <option value="all">全部数据表</option>
-            {tables.map((table) => (
-              <option key={table.name} value={table.name}>
-                {formatTableTitle(table)}
+            {availableTableOptions.map((table) => (
+              <option key={table.value} value={table.value}>
+                {table.label}
               </option>
             ))}
           </Select>
           <Input value={nodeQuery} onChange={(event) => setNodeQuery(event.target.value)} placeholder="搜索节点、字段或内容" />
+          <div className="flex gap-2 border-b border-[var(--border)]/60 pb-3">
+            <Button variant={scopeMode === "current" ? "default" : "outline"} size="sm" onClick={() => setScopeMode("current")} disabled={!hasCurrentIngestGraph}>
+              本次输入
+            </Button>
+            <Button variant={scopeMode === "all" ? "default" : "outline"} size="sm" onClick={() => setScopeMode("all")}>
+              全部图谱
+            </Button>
+          </div>
           <div className="border-t border-[var(--border)]/60 pt-3 text-[11px] text-[var(--muted-foreground)]">
-            工作区：{workspaceId || "-"} · 共 {filteredNodes.length} 个节点
+            工作区：{workspaceId || "-"} · {scopeMode === "current" ? "本次输入视图" : "全景视图"} · 共 {filteredNodes.length} 个节点
           </div>
           <ScrollArea className="h-[540px]">
             <div className="space-y-1">
@@ -1277,12 +1326,12 @@ function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
                   className={`w-full border-b border-[var(--border)]/50 px-2 py-2 text-left transition ${
                     selectedNode?.id === node.id ? "bg-[var(--accent)] text-[var(--foreground)]" : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
                   }`}
-                  onClick={() => setSelectedNodeId(node.id)}
-                >
-                  <div className="truncate text-xs font-medium">{node.label}</div>
-                  <div className="mt-1 text-[11px]">{node.tableTitle}</div>
-                </button>
-              ))}
+                    onClick={() => setSelectedNodeId(node.id)}
+                  >
+                    <div className="truncate text-xs font-medium">{node.label}</div>
+                    <div className="mt-1 text-[11px]">{node.tableTitle}</div>
+                  </button>
+                ))}
               {!filteredNodes.length ? <div className="px-2 py-4 text-xs text-[var(--muted-foreground)]">当前筛选条件下没有节点。</div> : null}
             </div>
           </ScrollArea>
@@ -1353,7 +1402,7 @@ function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
         <Card className="bg-transparent">
           <CardHeader className="border-b border-[var(--border)]/60 pb-3">
             <CardTitle>分析详情</CardTitle>
-            <CardDescription>点击节点后在这里查看详细字段、关系和来源。</CardDescription>
+            <CardDescription>点击节点后在这里查看画像、关系和来源。</CardDescription>
           </CardHeader>
           <CardContent>
             {selectedNode ? (
@@ -1363,13 +1412,54 @@ function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
                     <div className="truncate text-base font-semibold">{selectedNode.label}</div>
                     <div className="mt-1 text-xs text-[var(--muted-foreground)]">{selectedNode.tableTitle}</div>
                   </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {getVisibleColumns(selectedNode.table).map((column) => (
-                      <div key={`${selectedNode.id}-${column}`} className="border-b border-[var(--border)]/60 py-2 text-xs">
-                        <div className="truncate text-[var(--muted-foreground)] whitespace-nowrap">{formatColumnLabel(column)}</div>
-                        <div className="mt-1 break-words">{formatDisplayValue(selectedNode.row[column], referenceMap) || "—"}</div>
+                  <div className="grid gap-4">
+                    <div className="border-b border-[var(--border)]/60 pb-3">
+                      <div className="mb-3 text-xs font-medium text-[var(--foreground)]">基础画像</div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {profileSections.identity.length ? (
+                          profileSections.identity.map((item) => (
+                            <div key={`${selectedNode.id}-${item.key}`} className="border-b border-[var(--border)]/60 py-2 text-xs">
+                              <div className="truncate text-[var(--muted-foreground)] whitespace-nowrap">{item.label}</div>
+                              <div className="mt-1 break-words">{item.value}</div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-xs text-[var(--muted-foreground)]">当前节点还没有稳定的基础画像字段。</div>
+                        )}
                       </div>
-                    ))}
+                    </div>
+
+                    <div className="border-b border-[var(--border)]/60 pb-3">
+                      <div className="mb-3 text-xs font-medium text-[var(--foreground)]">特征细节</div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {profileSections.profile.length ? (
+                          profileSections.profile.map((item) => (
+                            <div key={`${selectedNode.id}-${item.key}`} className="border-b border-[var(--border)]/60 py-2 text-xs">
+                              <div className="truncate text-[var(--muted-foreground)] whitespace-nowrap">{item.label}</div>
+                              <div className="mt-1 break-words">{item.value}</div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-xs text-[var(--muted-foreground)]">当前节点还没有更丰富的特征细节。</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="mb-3 text-xs font-medium text-[var(--foreground)]">补充信息</div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {profileSections.details.length ? (
+                          profileSections.details.map((item) => (
+                            <div key={`${selectedNode.id}-${item.key}`} className="border-b border-[var(--border)]/60 py-2 text-xs">
+                              <div className="truncate text-[var(--muted-foreground)] whitespace-nowrap">{item.label}</div>
+                              <div className="mt-1 break-words">{item.value}</div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-xs text-[var(--muted-foreground)]">当前节点没有更多补充信息。</div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div className="space-y-5">
@@ -1711,11 +1801,16 @@ function OverviewView({
   completedTasks,
   staleTasks,
   trace,
+  graph,
+  currentIngestGraph,
 }) {
   const topTables = [...tables]
     .sort((left, right) => (right.rows || []).length - (left.rows || []).length)
     .slice(0, 4);
   const recentTrace = trace.slice(0, 5);
+  const graphNodeCount = graph?.metadata?.node_count || (graph?.nodes || []).length || 0;
+  const graphEdgeCount = graph?.metadata?.edge_count || (graph?.edges || []).length || 0;
+  const currentNodeCount = currentIngestGraph?.metadata?.node_count || (currentIngestGraph?.nodes || []).length || 0;
 
   return (
     <div className="space-y-6">
@@ -1723,7 +1818,7 @@ function OverviewView({
         <MetricCard label="业务表" value={tables.length} delta={`系统表 ${systemCount} 张`} hint="当前知识视图数量" icon={Database} />
         <MetricCard label="记录总数" value={totalRows} delta={`已完成 ${completedTasks}`} hint="全部业务表中的记录汇总" icon={FileText} />
         <MetricCard label="运行中任务" value={activeTasks} delta={queuedTasks ? `排队 ${queuedTasks}` : latestTask ? `最近：${formatStepLabel(latestTask.current_step || "-")}` : "暂无任务"} hint="同一工作区按顺序排队执行" icon={Activity} />
-        <MetricCard label="异常任务" value={staleTasks} delta={staleTasks ? "需要关注" : "状态正常"} hint="阻塞、失败或长时间无新进度" icon={GitBranch} />
+        <MetricCard label="图谱节点" value={graphNodeCount} delta={`连线 ${graphEdgeCount}`} hint={currentNodeCount ? `本次新增视图 ${currentNodeCount} 个节点` : "全景关系图规模"} icon={GitBranch} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
@@ -2257,6 +2352,12 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDelete
                   <div className="mt-3 space-y-3">
                     <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--muted-foreground)]">
                       <Badge variant="outline">{selectedTask.impact.source_count} 条来源</Badge>
+                      {selectedTask.impact?.graph?.node_count ? (
+                        <Badge variant="outline">节点 {selectedTask.impact.graph.node_count}</Badge>
+                      ) : null}
+                      {selectedTask.impact?.graph?.edge_count ? (
+                        <Badge variant="outline">关系 {selectedTask.impact.graph.edge_count}</Badge>
+                      ) : null}
                       {(selectedTask.impact.databases || []).map((database) => (
                         <Badge key={database.name} variant="outline">
                           {database.title} · {database.row_count} 条
@@ -2264,6 +2365,16 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDelete
                       ))}
                     </div>
                     <div className="space-y-2">
+                      {selectedTask.impact?.graph?.sample_nodes?.length ? (
+                        <div className="border-b border-[var(--border)]/60 px-0 py-3">
+                          <div className="font-medium text-[var(--foreground)]">
+                            本次新增节点 · {selectedTask.impact.graph.node_count} 个
+                          </div>
+                          <div className="mt-2 text-sm text-[var(--muted-foreground)]">
+                            {selectedTask.impact.graph.sample_nodes.join(" / ")}
+                          </div>
+                        </div>
+                      ) : null}
                       {(selectedTask.impact.databases || []).length ? (
                         selectedTask.impact.databases.map((database) => (
                           <div key={database.name} className="border-b border-[var(--border)]/60 px-0 py-3">
@@ -3280,6 +3391,19 @@ function formatColumnLabel(column) {
     claim_text: "原句",
     relation_type: "关系类型",
     confidence: "可信度",
+    discussion_topic: "讨论主题",
+    participant_id: "参与者",
+    participant_name: "参与者名称",
+    related_node_id: "关联节点",
+    related_node_name: "关联对象",
+    product_id: "产品",
+    organization_id: "机构",
+    opinion_type: "观点类型",
+    content_summary: "讨论内容",
+    confidence_level: "可信度",
+    discussion_date: "讨论时间",
+    sentiment: "情绪倾向",
+    technical_focus: "技术焦点",
   };
   if (labels[column]) return labels[column];
   return String(column || "")
@@ -3314,6 +3438,9 @@ function formatTableTitle(table) {
     tasks: "任务",
     product: "产品",
     products: "产品",
+    technical_discussions: "技术讨论记录",
+    promotion_relations: "推广关系",
+    concepts: "概念",
     relation: "关系",
     relations: "关系",
     claim: "事实",
@@ -3342,6 +3469,94 @@ function buildReferenceMap(tables) {
     }
   }
   return map;
+}
+
+function normalizeGraphNodes(graphPayload) {
+  return (graphPayload?.nodes || []).map((node) => {
+    const tableName = String(node.table || node.table_name || node.category || node.kind || "concepts");
+    const typeName = String(node.type || node.category || node.kind || "概念");
+    const displayName = node.name || node.label || node.id;
+    const row = {
+      id: node.id,
+      名称: displayName,
+      类型: typeName,
+      节点类型: node.kind || "entity",
+      source_refs: node.source_refs || [],
+      ...(node.attributes || {}),
+    };
+    return {
+      id: node.id,
+      label: displayName,
+      tableName,
+      tableTitle: formatTableTitle({ name: tableName, title: tableName }),
+      row,
+      table: {
+        name: tableName,
+        title: formatTableTitle({ name: tableName, title: tableName }),
+        columns: Object.keys(row),
+      },
+      sourceRefs: node.source_refs || [],
+      rawNode: node,
+    };
+  });
+}
+
+function buildNodeProfileSections(selectedNode, referenceMap) {
+  if (!selectedNode) {
+    return { identity: [], profile: [], details: [] };
+  }
+  const row = selectedNode.row || {};
+  const preferredIdentity = ["名称", "别名", "角色", "类型", "节点类型", "摘要", "说明", "立场", "观点"];
+  const preferredProfile = [
+    "role",
+    "alias",
+    "description",
+    "summary",
+    "concern",
+    "concerns",
+    "preference",
+    "preferences",
+    "stance",
+    "opinion",
+    "opinions",
+    "style",
+    "capability",
+    "capabilities",
+    "relationship_boundary",
+    "topic_focus",
+    "current_activity",
+    "physical_state",
+    "platform",
+    "company",
+    "organization",
+  ];
+  const excluded = new Set(["id", "source_refs", "source_ref"]);
+  const visibleColumns = Object.keys(row).filter((key) => !excluded.has(key));
+
+  const toEntries = (keys) =>
+    keys
+      .filter((key) => visibleColumns.includes(key) || row[key] !== undefined)
+      .map((key) => ({
+        key,
+        label: formatColumnLabel(key),
+        value: formatDisplayValue(row[key], referenceMap) || "—",
+      }))
+      .filter((item) => item.value && item.value !== "—");
+
+  const identity = toEntries(preferredIdentity);
+  const profile = toEntries(preferredProfile.filter((key) => !preferredIdentity.includes(key)));
+
+  const used = new Set([...identity.map((item) => item.key), ...profile.map((item) => item.key)]);
+  const details = visibleColumns
+    .filter((key) => !used.has(key))
+    .map((key) => ({
+      key,
+      label: formatColumnLabel(key),
+      value: formatDisplayValue(row[key], referenceMap) || "—",
+    }))
+    .filter((item) => item.value && item.value !== "—");
+
+  return { identity, profile, details };
 }
 
 function formatDisplayValue(value, referenceMap) {
@@ -3398,6 +3613,50 @@ function buildWorkspaceEdges(nodes, tables, referenceMap) {
     }
   }
   return dedupeWorkspaceEdges(edges);
+}
+
+function buildWorkspaceEdgesFromGraph(graphPayload, nodes) {
+  const nodeIds = new Set((nodes || []).map((node) => node.id));
+  return dedupeWorkspaceEdges(
+    (graphPayload?.edges || [])
+      .filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+      .map((edge) => ({
+        sourceId: edge.source,
+        targetId: edge.target,
+        label: edge.relation || edge.kind || "关联",
+      })),
+  );
+}
+
+function buildGraphConnections(selectedNode, graphPayload) {
+  const nodeMap = new Map((normalizeGraphNodes(graphPayload) || []).map((node) => [node.id, node]));
+  return dedupeConnections(
+    (graphPayload?.edges || [])
+      .filter((edge) => edge.source === selectedNode.id || edge.target === selectedNode.id)
+      .map((edge) => {
+        const targetId = edge.source === selectedNode.id ? edge.target : edge.source;
+        const targetNode = nodeMap.get(targetId);
+        return {
+          label: targetNode?.label || targetId,
+          description: `${edge.relation || edge.kind || "关联"} → ${targetNode?.tableTitle || "节点"}`,
+          targetTableName: targetNode?.tableName || "",
+          targetTableTitle: targetNode?.tableTitle || "节点",
+          targetId,
+        };
+      }),
+  );
+}
+
+function buildGraphSourceSnippets(selectedNode, recentSources) {
+  const sourceSet = new Set(selectedNode?.sourceRefs || selectedNode?.row?.source_refs || []);
+  return (recentSources || [])
+    .filter((source) => sourceSet.has(source.source_id))
+    .slice(0, 4)
+    .map((source) => ({
+      title: source.metadata?.title || source.metadata?.filename || source.source_id || "来源",
+      meta: [source.source_type || "doc", formatTaskTime(source.ingested_at)].filter(Boolean).join(" · "),
+      summary: buildSourceSummary(source.content || source.summary || ""),
+    }));
 }
 
 function dedupeWorkspaceEdges(edges) {
