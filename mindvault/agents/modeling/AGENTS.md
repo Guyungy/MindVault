@@ -23,3 +23,14 @@
   - 这张表的 `record_granularity` 是什么
   - 它和其他表是否真的不同
 - 如果两张业务表只是同一批记录换了标题，保留一张即可。
+- `database_plan` 必须给出：
+  - domain
+  - databases
+  - relations
+  - 每张表的 row_source / record_granularity / suggested_fields
+- `multi_db` 必须给出：
+  - 至少一个可落地的业务表
+  - 每张表明确的 columns
+  - 每行真实 row 数据
+- 如果当前只要求生成单张表，也必须返回合法 JSON，不要输出解释文字。
+- 如果某张派生表实在没有足够数据生成行，也要返回空 `rows` 和完整 `columns`，不要返回自然语言说明。

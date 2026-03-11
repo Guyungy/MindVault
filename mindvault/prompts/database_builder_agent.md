@@ -43,6 +43,25 @@
 - 派生业务表必须有自己的记录主键和至少一个表特有字段有真实值
 - 如果输入里的 `database_plan.databases` 只有 1 张表，就只为这 1 张表生成结果
 - 优先完整生成当前这张表，不要为了补全其他表而扩写无关内容
+- 即使当前表没有足够行，也必须返回合法 JSON，至少给出：
+  - name
+  - title
+  - description
+  - primary_key
+  - columns
+  - rows: []
+- 如果当前输入只有 1 张表，允许输出单张表；不要为了满足“多个数据库”而额外编造其他表
+- `rows` 要尽量细化字段，不要把一整句原文塞进唯一一列
+- 对派生表，优先从 `claims / relations / events` 组装一行，而不是复制实体表
+- 尽量保留：
+  - source_ref / source_refs
+  - evidence_excerpt
+  - 讨论主题
+  - 资源链接
+  - 部署方式
+  - 建议/结论
+  - 相关人物/产品/组织 ID
+- 如果某个字段可以拆成更具体列，例如 `deployment_mode / operating_system / background_running / resource_url / recommendation_type`，优先拆开
 - 只输出合法 JSON
 
 输入：

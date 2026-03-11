@@ -46,7 +46,14 @@
   "entity_id": "ent_type_slug",
   "type": "person|venue|organization|product|technician|...",
   "name": "名称",
-  "attributes": {},
+  "attributes": {
+    "role": "可选",
+    "deployment_mode": "可选",
+    "system_requirement": "可选",
+    "resource_url": "可选",
+    "preference": "可选",
+    "status": "可选"
+  },
   "source_refs": ["{{source_id}}"]
 }
 ```
@@ -59,7 +66,8 @@
   "source_entity": "entity_id_1",
   "target_entity": "entity_id_2",
   "relation_type": "belongs_to|located_in|works_at|...",
-  "evidence": "原文佐证"
+  "evidence": "原文佐证",
+  "confidence": 0.0-1.0
 }
 ```
 
@@ -72,7 +80,9 @@
   "type": "event_type",
   "description": "描述",
   "timestamp": "如果有的话",
-  "participants": ["entity_id_1"]
+  "participants": ["entity_id_1"],
+  "status": "active|completed|planned|uncertain",
+  "topic": "如果能明确"
 }
 ```
 
@@ -96,11 +106,20 @@
 3. 如果不确定某个信息的真实性，设置 claim_type 为 uncertain 并降低 confidence
 4. 不要编造文本中没有的信息
 5. 保留原文语言（中文则继续用中文作为 name 和 description）
+6. 对实体 attributes 尽量补出细字段，而不是只留空对象；特别关注：
+   - 人物：role, preference, concern, boundary, opinion, deployment_preference
+   - 产品：deployment_mode, system_requirement, background_running, can_register_as_service, component, version, url
+   - 组织/地点：platform_type, location, scope, website
+7. claim 的 predicate 尽量短而明确，不要直接复制整句原文
+8. event 要尽量表达“发生了什么”，不要只写成模糊摘要
+9. 如果文本里有 URL、命令、版本号、配置方式、系统名、时间点、金额、报价、资源标题，请尽量保留进结构化字段
+10. 如果一段文本包含多条事实，例如“前置条件 + 配置方式 + 结果”，请拆成多条 claim 或 event
 6. 如果 source_type 是 `chat`，优先提取：
    - 说话人实体
    - 可长期复用的人物特征、偏好、边界、状态
    - 双方互动事件（提问、安慰、冲突、夸赞、拒绝、讨论）
    - 关系信号（亲密、疏离、支持、边界）
-7. 如果 context_note 提到“个人数据库”或“个人信息数据库”，不要把输出做成泛泛的 `organization/area/service` 风格；优先输出对人物档案和互动记录有用的信息。
-8. 对聊天记录，不要把“别人”“她们”“有人”这类泛指代词轻易当成稳定实体；只有反复出现且可追踪时才建实体。
-9. 对聊天记录，优先少而准，不要为了凑数量生造 claim。
+11. 如果 context_note 提到“个人数据库”或“个人信息数据库”，不要把输出做成泛泛的 `organization/area/service` 风格；优先输出对人物档案和互动记录有用的信息。
+12. 对聊天记录，不要把“别人”“她们”“有人”这类泛指代词轻易当成稳定实体；只有反复出现且可追踪时才建实体。
+13. 对聊天记录，优先少而准，但对明确出现的偏好、建议、资源分享、互动动作要尽量提全。
+14. 如果没有某一类结果，返回空数组，不要返回解释文字。
