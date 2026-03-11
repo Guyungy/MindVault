@@ -133,6 +133,7 @@ const STEP_LABELS = {
   wiki: "知识页生成",
   report: "报告生成",
   insight: "洞察生成",
+  queued: "等待执行",
 };
 
 const TRACE_EVENT_LABELS = {
@@ -200,10 +201,11 @@ export default function App() {
   const trace = payload?.trace || [];
   const recentSources = payload?.recentSources || [];
   const latestTask = payload?.latestTask || tasks[0] || null;
-  const shouldPollTasks = isPollingTask || tasks.some((task) => task.status === "running");
+  const shouldPollTasks = isPollingTask || tasks.some((task) => ["running", "queued"].includes(task.status));
   const activeTableData = visibleTables.find((table) => table.name === activeTable) || visibleTables[0] || null;
   const totalRows = businessTables.reduce((sum, table) => sum + (table.rows || []).length, 0);
   const activeTasks = tasks.filter((task) => task.status === "running").length;
+  const queuedTasks = tasks.filter((task) => task.status === "queued").length;
   const completedTasks = tasks.filter((task) => task.status === "completed").length;
   const staleTasks = tasks.filter((task) => ["stale", "blocked", "failed"].includes(task.monitor?.health || task.status)).length;
   const filteredRows = useMemo(() => {
@@ -306,7 +308,7 @@ export default function App() {
     ]
       .filter(Boolean)
       .join(" · ");
-    setIngestStatus({ ok: true, loading: latestTask.status === "running", message });
+    setIngestStatus({ ok: true, loading: ["running", "queued"].includes(latestTask.status), message });
     if (["completed", "failed", "blocked", "paused"].includes(latestTask.status)) {
       setIsPollingTask(false);
     }
@@ -604,7 +606,7 @@ export default function App() {
         throw new Error(data?.error || `Request failed: ${response.status}`);
       }
       setIngestStatus({ ok: true, loading: true, message: data?.message || "已提交后台处理。" });
-      setActiveView("input");
+      setActiveView("tasks");
       setIsPollingTask(true);
       setTextInput("");
       setJsonInput("");
@@ -1655,7 +1657,7 @@ function OverviewView({
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="业务表" value={tables.length} delta={`系统表 ${systemCount} 张`} hint="当前知识视图数量" icon={Database} />
         <MetricCard label="记录总数" value={totalRows} delta={`已完成 ${completedTasks}`} hint="全部业务表中的记录汇总" icon={FileText} />
-        <MetricCard label="运行中任务" value={activeTasks} delta={latestTask ? `最近：${formatStepLabel(latestTask.current_step || "-")}` : "暂无任务"} hint="建议同一工作区串行执行" icon={Activity} />
+        <MetricCard label="运行中任务" value={activeTasks} delta={queuedTasks ? `排队 ${queuedTasks}` : latestTask ? `最近：${formatStepLabel(latestTask.current_step || "-")}` : "暂无任务"} hint="同一工作区按顺序排队执行" icon={Activity} />
         <MetricCard label="异常任务" value={staleTasks} delta={staleTasks ? "需要关注" : "状态正常"} hint="阻塞、失败或长时间无新进度" icon={GitBranch} />
       </div>
 
@@ -1818,6 +1820,7 @@ function IngestPanel({
   onSubmit,
 }) {
   const latestTaskStatus = getEffectiveTaskStatus(latestTask);
+  const queueAwareRunning = ["running", "queued"].includes(latestTaskStatus);
   const recentSourceColumns = [
     {
       accessorKey: "source_id",
@@ -1895,8 +1898,8 @@ function IngestPanel({
               placeholder="可选备注，会作为 AI 归档判断的补充提示"
             />
           </label>
-          <Button onClick={onSubmit} disabled={latestTaskStatus === "running"}>
-            {latestTaskStatus === "running" ? "任务运行中" : "提交资料"}
+          <Button onClick={onSubmit}>
+            {queueAwareRunning ? "加入队列" : "提交资料"}
           </Button>
         </div>
 
@@ -1905,8 +1908,8 @@ function IngestPanel({
             <div className={`text-sm ${ingestStatus.ok ? "text-[var(--primary)]" : ingestStatus.loading ? "text-[var(--muted-foreground)]" : "text-[var(--destructive)]"}`}>
               {ingestStatus.message}
             </div>
-            {latestTaskStatus === "running" ? (
-              <div className="mt-2 text-xs text-[var(--muted-foreground)]">同一个工作区当前只建议串行运行一个任务，避免同时写同一批产物文件。</div>
+            {queueAwareRunning ? (
+              <div className="mt-2 text-xs text-[var(--muted-foreground)]">同一个工作区会按顺序排队执行，避免同时写入同一批产物文件。</div>
             ) : null}
             <div className="mt-2 text-xs text-[var(--muted-foreground)]">系统会根据内容和备注自动判断归入哪些业务表，不再手动选表。</div>
             {latestTask ? (
@@ -2752,7 +2755,13 @@ function SummaryRow({ label, value }) {
 
 function StatusBadge({ task }) {
   const status = getEffectiveTaskStatus(task);
-  const variant = ["failed", "blocked", "stale"].includes(status) ? "danger" : status === "running" ? "warm" : "default";
+  const variant = ["failed", "blocked", "stale"].includes(status)
+    ? "danger"
+    : status === "running"
+      ? "warm"
+      : status === "queued"
+        ? "outline"
+        : "default";
   return <Badge variant={variant}>{mapTaskStatus(status)}</Badge>;
 }
 
@@ -2769,6 +2778,9 @@ function MonitorBadge({ task }) {
 function getEffectiveTaskStatus(task) {
   const baseStatus = task?.status || "unknown";
   const health = task?.monitor?.health;
+  if (baseStatus === "queued") {
+    return "queued";
+  }
   if (baseStatus === "running" && ["blocked", "failed"].includes(health)) {
     return health;
   }
@@ -2777,6 +2789,7 @@ function getEffectiveTaskStatus(task) {
 
 function mapTaskStatus(status) {
   const mapping = {
+    queued: "排队中",
     running: "运行中",
     completed: "已完成",
     failed: "失败",

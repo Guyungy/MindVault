@@ -23,6 +23,8 @@ const skillsRegistryPath = path.join(rootDir, "config", "skills_registry.json");
 const agentSkillBindingsPath = path.join(rootDir, "config", "agent_skill_bindings.json");
 const port = Number(process.env.PORT || 4310);
 const host = process.env.HOST || "127.0.0.1";
+const workspaceActiveProcesses = new Map();
+const workspaceQueueLocks = new Map();
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -145,6 +147,10 @@ const server = createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`MindVault frontend: http://${host}:${port}`);
   void maybeAutoUpdateSkills();
+  void processAllWorkspaceQueues();
+  setInterval(() => {
+    void processAllWorkspaceQueues();
+  }, 3000);
 });
 
 async function listWorkspaces() {
@@ -255,16 +261,28 @@ async function handleTaskDelete(res, workspaceId, taskId) {
     }
     const taskRoot = path.join(workspacesDir, safeWorkspaceId, "tasks", safeTaskId);
     const meta = await safeStat(taskRoot);
-    if (!meta?.isDirectory()) {
-      return sendJson(res, { error: "task not found" }, 404);
+    if (meta?.isDirectory()) {
+      await rm(taskRoot, { recursive: true, force: true });
+      return sendJson(res, {
+        success: true,
+        workspace: safeWorkspaceId,
+        task_id: safeTaskId,
+        message: "任务已删除。",
+      });
     }
-    await rm(taskRoot, { recursive: true, force: true });
-    return sendJson(res, {
-      success: true,
-      workspace: safeWorkspaceId,
-      task_id: safeTaskId,
-      message: "任务已删除。",
-    });
+    const workspaceRoot = path.join(workspacesDir, safeWorkspaceId);
+    const queue = await readWorkspaceQueue(workspaceRoot);
+    const nextQueue = queue.filter((item) => item.task_id !== safeTaskId);
+    if (nextQueue.length !== queue.length) {
+      await writeWorkspaceQueue(workspaceRoot, nextQueue);
+      return sendJson(res, {
+        success: true,
+        workspace: safeWorkspaceId,
+        task_id: safeTaskId,
+        message: "排队任务已删除。",
+      });
+    }
+    return sendJson(res, { error: "task not found" }, 404);
   } catch (error) {
     return sendJson(res, { error: error.message }, 500);
   }
@@ -617,12 +635,13 @@ async function readWorkspacePayload(workspaceId) {
     return { error: `Workspace not found: ${workspaceId}` };
   }
 
-  const [multiDb, plan, trace, rawSources, tasks] = await Promise.all([
+  const [multiDb, plan, trace, rawSources, tasks, queue] = await Promise.all([
     readJsonSafe(multiDbPath, { databases: [], relations: [] }),
     readJsonSafe(planPath, { databases: [], relations: [] }),
     readJsonSafe(tracePath, []),
     readJsonSafe(rawSourcesPath, []),
     readTasks(path.join(workspaceRoot, "tasks")),
+    readWorkspaceQueue(workspaceRoot),
   ]);
   const normalizedPlan = applyDatabaseVisibility(plan);
   const normalizedMultiDb = applyDatabaseVisibility(multiDb, normalizedPlan);
@@ -631,7 +650,11 @@ async function readWorkspacePayload(workspaceId) {
     ...task,
     impact: summarizeTaskImpact(task, rawSources, normalizedMultiDb),
   }));
-  const latestTask = tasksWithImpact[0] || null;
+  const queuedTasks = buildQueuedTasks(queue);
+  const mergedTasks = [...tasksWithImpact, ...queuedTasks].sort((left, right) => {
+    return getTaskSortTimestamp(right) - getTaskSortTimestamp(left);
+  });
+  const latestTask = mergedTasks[0] || null;
 
   return {
     workspace: workspaceId,
@@ -639,9 +662,10 @@ async function readWorkspacePayload(workspaceId) {
     multiDb: normalizedMultiDb,
     databasePlan: normalizedPlan,
     trace,
-    tasks: tasksWithImpact,
+    tasks: mergedTasks,
     latestTask,
     recentSources,
+    queue: queuedTasks,
   };
 }
 
@@ -821,6 +845,118 @@ async function readTasks(taskDir) {
     }
   }
   return tasks;
+}
+
+function workspaceQueuePath(workspaceRoot) {
+  return path.join(workspaceRoot, "config", "ingest_queue.json");
+}
+
+async function readWorkspaceQueue(workspaceRoot) {
+  const queue = await readJsonSafe(workspaceQueuePath(workspaceRoot), []);
+  return Array.isArray(queue) ? queue : [];
+}
+
+async function writeWorkspaceQueue(workspaceRoot, queue) {
+  const queuePath = workspaceQueuePath(workspaceRoot);
+  await mkdir(path.dirname(queuePath), { recursive: true });
+  await writeFile(queuePath, JSON.stringify(queue, null, 2), "utf-8");
+}
+
+function buildQueuedTasks(queue) {
+  return (queue || []).map((entry, index) => ({
+    task_id: entry.task_id,
+    status: "queued",
+    current_step: "queued",
+    current_agent: "",
+    last_heartbeat: entry.created_at,
+    started_at: entry.created_at,
+    ended_at: "",
+    resume_hint: `等待前序任务完成后自动启动。当前排队第 ${index + 1} 位。`,
+    artifacts: {},
+    recentSteps: [],
+    stepEntries: [],
+    stepTimeline: [],
+    monitor: {
+      health: "queued",
+      heartbeat_age_seconds: null,
+      activity_age_seconds: null,
+      is_stale: false,
+      recent_fallbacks: 0,
+      recent_failures: 0,
+      step_count: 0,
+    },
+    impact: {
+      source_count: entry.source_count || 0,
+      source_ids: [],
+      databases: [],
+    },
+    isQueueEntry: true,
+    queued_position: index + 1,
+    created_at: entry.created_at,
+  }));
+}
+
+function getTaskSortTimestamp(task) {
+  const value = task?.created_at || task?.started_at || task?.last_heartbeat || task?.ended_at || "";
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function withWorkspaceQueueLock(workspaceId, fn) {
+  const previous = workspaceQueueLocks.get(workspaceId) || Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(fn)
+    .finally(() => {
+      if (workspaceQueueLocks.get(workspaceId) === next) {
+        workspaceQueueLocks.delete(workspaceId);
+      }
+    });
+  workspaceQueueLocks.set(workspaceId, next);
+  return next;
+}
+
+async function processAllWorkspaceQueues() {
+  if (!existsSync(workspacesDir)) return;
+  const names = await readdir(workspacesDir);
+  await Promise.all(
+    names.map(async (workspaceId) => {
+      const absolute = path.join(workspacesDir, workspaceId);
+      const meta = await safeStat(absolute);
+      if (!meta?.isDirectory()) return;
+      await maybeStartQueuedIngest(workspaceId);
+    }),
+  );
+}
+
+async function maybeStartQueuedIngest(workspaceId) {
+  return withWorkspaceQueueLock(workspaceId, async () => {
+    const workspaceRoot = path.join(workspacesDir, workspaceId);
+    if (!existsSync(workspaceRoot)) return false;
+    if (workspaceActiveProcesses.has(workspaceId)) return false;
+
+    const tasks = await readTasks(path.join(workspaceRoot, "tasks"));
+    if (tasks.some((task) => task.status === "running")) return false;
+
+    const queue = await readWorkspaceQueue(workspaceRoot);
+    if (!queue.length) return false;
+
+    let nextEntry = null;
+    const remaining = [];
+    for (const entry of queue) {
+      if (!nextEntry && entry?.input_path && existsSync(entry.input_path)) {
+        nextEntry = entry;
+        continue;
+      }
+      remaining.push(entry);
+    }
+
+    await writeWorkspaceQueue(workspaceRoot, remaining);
+    if (!nextEntry) return false;
+
+    startIngestCommand(workspaceId, nextEntry.input_path);
+    return true;
+  });
 }
 
 async function readStepLog(stepLogPath, maxItems) {
@@ -1114,20 +1250,6 @@ async function handleIngest(req, res, workspaceId) {
   }
 
   try {
-    const tasks = await readTasks(path.join(workspaceRoot, "tasks"));
-    const activeTask = tasks.find((task) => task.status === "running");
-    if (activeTask) {
-      return sendJson(
-        res,
-        {
-          error: `workspace has an active task: ${activeTask.task_id}`,
-          task_id: activeTask.task_id,
-          current_step: activeTask.current_step,
-        },
-        409,
-      );
-    }
-
     const { fields, uploads } = await parseIngestRequest(req);
     const sources = buildIngestSources(fields, uploads);
     if (!sources.length) {
@@ -1138,13 +1260,39 @@ async function handleIngest(req, res, workspaceId) {
     await mkdir(tempDir, { recursive: true });
     const tempPath = path.join(tempDir, `ingest_${workspaceId}_${Date.now()}.json`);
     await writeFile(tempPath, JSON.stringify(sources, null, 2), "utf-8");
+    const queueEntry = {
+      task_id: `queued_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      created_at: new Date().toISOString(),
+      input_path: tempPath,
+      source_count: sources.length,
+      note: fields.note || "",
+    };
 
-    startIngestCommand(workspaceId, tempPath);
+    const queued = await withWorkspaceQueueLock(workspaceId, async () => {
+      const queue = await readWorkspaceQueue(workspaceRoot);
+      const tasks = await readTasks(path.join(workspaceRoot, "tasks"));
+      const hasActiveTask = workspaceActiveProcesses.has(workspaceId) || tasks.some((task) => task.status === "running");
+
+      if (hasActiveTask || queue.length) {
+        await writeWorkspaceQueue(workspaceRoot, [...queue, queueEntry]);
+        return true;
+      }
+
+      startIngestCommand(workspaceId, tempPath);
+      return false;
+    });
+    if (queued) {
+      void maybeStartQueuedIngest(workspaceId);
+    }
+
     return sendJson(res, {
       success: true,
       accepted: true,
       workspace: workspaceId,
-      message: "Ingest started in background. Check Tasks for progress.",
+      queued,
+      task_id: queueEntry.task_id,
+      queue_length: (await readWorkspaceQueue(workspaceRoot)).length,
+      message: queued ? "任务已加入队列，等待前序任务完成后自动启动。" : "任务已启动，请在任务页查看进度。",
     });
   } catch (error) {
     return sendJson(res, { error: error.message }, 500);
@@ -1245,8 +1393,17 @@ function buildIngestSources(fields, uploads) {
 function startIngestCommand(workspaceId, inputPath) {
   const python = spawn("python3", ["-m", "mindvault.runtime.app", "-w", workspaceId, "-i", inputPath], {
     cwd: rootDir,
-    detached: true,
     stdio: "ignore",
   });
-  python.unref();
+  workspaceActiveProcesses.set(workspaceId, {
+    pid: python.pid,
+    started_at: new Date().toISOString(),
+    input_path: inputPath,
+  });
+  const onSettled = () => {
+    workspaceActiveProcesses.delete(workspaceId);
+    void maybeStartQueuedIngest(workspaceId);
+  };
+  python.on("exit", onSettled);
+  python.on("error", onSettled);
 }
