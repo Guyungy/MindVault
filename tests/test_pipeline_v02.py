@@ -446,6 +446,50 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertIn(("people", "friend_ids", "people"), inferred)
         self.assertIn(("people", "home_place_id", "places"), inferred)
 
+    def test_build_modeling_context_scopes_records_to_current_table(self):
+        runtime = VaultRuntime(self.workspace)
+        state = {
+            "entities": [
+                {"id": "ent_person_alice", "name": "Alice", "type": "person", "attributes": {}},
+                {"id": "ent_product_claw", "name": "Claw", "type": "product", "attributes": {}},
+                {"id": "ent_org_lab", "name": "Lab", "type": "organization", "attributes": {}},
+            ],
+            "claims": [
+                {"id": "claim_1", "subject": "ent_product_claw", "predicate": "owner", "object": "ent_org_lab"},
+                {"id": "claim_2", "subject": "ent_person_alice", "predicate": "uses", "object": "ent_product_claw"},
+            ],
+            "relations": [
+                {"source": "ent_person_alice", "relation": "uses", "target": "ent_product_claw"},
+                {"source": "ent_product_claw", "relation": "owned_by", "target": "ent_org_lab"},
+            ],
+            "events": [
+                {"id": "evt_1", "type": "discussion", "entities": ["ent_person_alice", "ent_product_claw"]},
+            ],
+        }
+        database_plan = {
+            "databases": [
+                {"name": "products", "entity_types": ["product"], "row_source": "entities"},
+                {"name": "persons", "entity_types": ["person"], "row_source": "entities"},
+                {"name": "organizations", "entity_types": ["organization"], "row_source": "entities"},
+            ],
+            "relations": [
+                {"from_db": "products", "to_db": "organizations", "type": "owned_by"},
+            ],
+        }
+
+        context = runtime._build_modeling_context(
+            state,
+            database_spec=database_plan["databases"][0],
+            database_plan=database_plan,
+        )
+
+        entity_ids = {item["id"] for item in context["entities"]}
+        self.assertIn("ent_product_claw", entity_ids)
+        self.assertIn("ent_org_lab", entity_ids)
+        self.assertNotIn("ent_person_alice", entity_ids)
+        claim_subjects = {item["subject"] for item in context["claims"]}
+        self.assertTrue(claim_subjects.issubset({"ent_product_claw", "ent_person_alice"}))
+
     def test_finalize_multi_db_prunes_duplicate_derived_business_tables(self):
         runtime = VaultRuntime(self.workspace)
         database_plan = {

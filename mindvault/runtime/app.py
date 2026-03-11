@@ -35,6 +35,11 @@ class VaultRuntime:
     table semantics, and explanation strategy belong to the four main agents.
     """
 
+    MODELING_ENTITY_BATCH_SIZE = 18
+    MODELING_CLAIM_BATCH_SIZE = 24
+    MODELING_RELATION_BATCH_SIZE = 18
+    MODELING_EVENT_BATCH_SIZE = 14
+
     def __init__(self, workspace_id: str, config_root: str = "mindvault/config", verbose: bool = False) -> None:
         self.workspace_store = WorkspaceStore()
         self.ctx: WorkspaceContext = self.workspace_store.resolve(workspace_id)
@@ -477,7 +482,6 @@ class VaultRuntime:
         database_builder_agent_path = Path("mindvault/agents/database_builder_agent.yaml")
         if not database_builder_agent_path.exists():
             raise RuntimeError("database_builder_agent definition not found")
-        modeling_context = self._build_modeling_context(state)
         built_databases: List[Dict[str, Any]] = []
         warnings: List[Dict[str, str]] = []
 
@@ -492,19 +496,47 @@ class VaultRuntime:
                     if relation.get("from_db") == database_spec.get("name") or relation.get("to_db") == database_spec.get("name")
                 ],
             }
-            context = {
-                "database_plan": single_plan,
-                **modeling_context,
-            }
+            modeling_context = self._build_modeling_context(
+                state,
+                database_spec=database_spec,
+                database_plan=database_plan,
+            )
+            self.trace.log(
+                "multi_db_table_context",
+                table=database_spec.get("name", ""),
+                entities=len(modeling_context.get("entities", [])),
+                claims=len(modeling_context.get("claims", [])),
+                relations=len(modeling_context.get("relations", [])),
+                events=len(modeling_context.get("events", [])),
+            )
+            context_batches = self._split_modeling_context_into_batches(modeling_context)
             try:
-                result = self.executor.execute(database_builder_agent_path, context)
-                self._raise_on_agent_error(result, "database_builder_agent")
-                normalized_tables = self._normalize_database_builder_result(result, database_spec)
-                if not normalized_tables:
-                    raise RuntimeError(
-                        f"database_builder_agent returned no structured table output for '{database_spec.get('name', '')}'"
+                table_payloads: List[Dict[str, Any]] = []
+                for batch_index, batch_context in enumerate(context_batches, start=1):
+                    self.trace.log(
+                        "multi_db_table_batch",
+                        table=database_spec.get("name", ""),
+                        batch=batch_index,
+                        total_batches=len(context_batches),
+                        entities=len(batch_context.get("entities", [])),
+                        claims=len(batch_context.get("claims", [])),
+                        relations=len(batch_context.get("relations", [])),
+                        events=len(batch_context.get("events", [])),
                     )
-                built_databases.extend(normalized_tables)
+                    context = {
+                        "database_plan": single_plan,
+                        **batch_context,
+                    }
+                    result = self.executor.execute(database_builder_agent_path, context)
+                    self._raise_on_agent_error(result, "database_builder_agent")
+                    normalized_tables = self._normalize_database_builder_result(result, database_spec)
+                    if not normalized_tables:
+                        raise RuntimeError(
+                            f"database_builder_agent returned no structured table output for '{database_spec.get('name', '')}'"
+                        )
+                    table_payloads.extend(normalized_tables)
+
+                built_databases.extend(self._merge_database_payloads(table_payloads, database_spec))
             except Exception as exc:
                 error_text = str(exc)
                 self.trace.log(
@@ -619,14 +651,375 @@ class VaultRuntime:
             "visibility": payload.get("visibility") or database_spec.get("visibility", "business"),
         }
 
-    def _build_modeling_context(self, state: Dict[str, Any], governance: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def _build_modeling_context(
+        self,
+        state: Dict[str, Any],
+        governance: Dict[str, Any] | None = None,
+        database_spec: Dict[str, Any] | None = None,
+        database_plan: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        entities = state.get("entities", [])
+        claims = state.get("claims", [])
+        relations = state.get("relations", [])
+        events = state.get("events", [])
+
+        if database_spec is not None:
+            entities, claims, relations, events = self._scope_modeling_records(
+                entities=entities,
+                claims=claims,
+                relations=relations,
+                events=events,
+                database_spec=database_spec,
+                database_plan=database_plan or {},
+            )
+
         return {
-            "entities": [self._compact_entity_for_modeling(item) for item in state.get("entities", [])],
-            "claims": [self._compact_claim_for_modeling(item) for item in state.get("claims", [])],
-            "relations": [self._compact_relation_for_modeling(item) for item in state.get("relations", [])],
-            "events": [self._compact_event_for_modeling(item) for item in state.get("events", [])],
+            "entities": [self._compact_entity_for_modeling(item) for item in entities],
+            "claims": [self._compact_claim_for_modeling(item) for item in claims],
+            "relations": [self._compact_relation_for_modeling(item) for item in relations],
+            "events": [self._compact_event_for_modeling(item) for item in events],
             "governance": self._compact_governance_for_modeling(governance or {}),
         }
+
+    def _scope_modeling_records(
+        self,
+        *,
+        entities: List[Dict[str, Any]],
+        claims: List[Dict[str, Any]],
+        relations: List[Dict[str, Any]],
+        events: List[Dict[str, Any]],
+        database_spec: Dict[str, Any],
+        database_plan: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        entity_by_id = {
+            str(item.get("id", "")): item
+            for item in entities
+            if item.get("id")
+        }
+        database_name = str(database_spec.get("name", "")).strip()
+        row_source = str(database_spec.get("row_source", "mixed") or "mixed").strip().lower()
+        target_types = self._collect_relevant_entity_types(database_spec, database_plan)
+
+        selected_entities = [
+            item for item in entities
+            if item.get("type") in target_types
+        ] if target_types else []
+        if row_source == "entities" and not selected_entities:
+            selected_entities = list(entities)
+
+        seed_ids = {
+            str(item.get("id", ""))
+            for item in selected_entities
+            if item.get("id")
+        }
+
+        selected_claims = [
+            item for item in claims
+            if self._claim_matches_seed_ids(item, seed_ids)
+        ]
+        selected_relations = [
+            item for item in relations
+            if self._relation_matches_seed_ids(item, seed_ids)
+        ]
+        selected_events = [
+            item for item in events
+            if self._event_matches_seed_ids(item, seed_ids)
+        ]
+
+        if row_source == "entities":
+            selected_events = []
+
+        if row_source in {"claims", "mixed"} and not selected_claims:
+            selected_claims = list(claims)
+        if row_source in {"relations", "mixed"} and not selected_relations:
+            selected_relations = list(relations)
+        if row_source in {"events", "mixed"} and not selected_events:
+            selected_events = list(events)
+
+        referenced_ids = set(seed_ids)
+        for claim in selected_claims:
+            referenced_ids.update(self._extract_claim_entity_ids(claim))
+        for relation in selected_relations:
+            referenced_ids.update(self._extract_relation_entity_ids(relation))
+        for event in selected_events:
+            referenced_ids.update(self._extract_event_entity_ids(event))
+
+        if referenced_ids:
+            selected_entities = self._unique_records_by_key(
+                selected_entities + [
+                    entity_by_id[item_id]
+                    for item_id in referenced_ids
+                    if item_id in entity_by_id
+                    and (
+                        not target_types
+                        or entity_by_id[item_id].get("type") in target_types
+                    )
+                ],
+                "id",
+            )
+
+        allowed_entity_ids = {
+            str(item.get("id", ""))
+            for item in selected_entities
+            if item.get("id")
+        }
+
+        if allowed_entity_ids:
+            selected_claims = [
+                item for item in selected_claims
+                if self._claim_matches_seed_ids(item, allowed_entity_ids)
+            ]
+            selected_relations = [
+                item for item in selected_relations
+                if self._relation_matches_seed_ids(item, allowed_entity_ids)
+            ]
+            selected_events = [
+                item for item in selected_events
+                if self._event_matches_seed_ids(item, allowed_entity_ids)
+            ]
+
+        self.trace.log(
+            "multi_db_scope_applied",
+            table=database_name,
+            row_source=row_source,
+            target_types=sorted(target_types),
+            entities=len(selected_entities),
+            claims=len(selected_claims),
+            relations=len(selected_relations),
+            events=len(selected_events),
+        )
+        return selected_entities, selected_claims, selected_relations, selected_events
+
+    @staticmethod
+    def _collect_relevant_entity_types(database_spec: Dict[str, Any], database_plan: Dict[str, Any]) -> set[str]:
+        types = {
+            str(item).strip()
+            for item in (database_spec.get("entity_types", []) or [])
+            if str(item).strip()
+        }
+        database_name = str(database_spec.get("name", "")).strip()
+        databases = {
+            str(item.get("name", "")).strip(): item
+            for item in database_plan.get("databases", [])
+            if isinstance(item, dict)
+        }
+        for relation in database_plan.get("relations", []) or []:
+            if not isinstance(relation, dict):
+                continue
+            if relation.get("from_db") == database_name:
+                related = databases.get(str(relation.get("to_db", "")).strip(), {})
+                types.update(
+                    str(item).strip()
+                    for item in (related.get("entity_types", []) or [])
+                    if str(item).strip()
+                )
+            elif relation.get("to_db") == database_name:
+                related = databases.get(str(relation.get("from_db", "")).strip(), {})
+                types.update(
+                    str(item).strip()
+                    for item in (related.get("entity_types", []) or [])
+                    if str(item).strip()
+                )
+        return types
+
+    @staticmethod
+    def _claim_matches_seed_ids(claim: Dict[str, Any], seed_ids: set[str]) -> bool:
+        if not seed_ids:
+            return False
+        return bool(VaultRuntime._extract_claim_entity_ids(claim) & seed_ids)
+
+    @staticmethod
+    def _relation_matches_seed_ids(relation: Dict[str, Any], seed_ids: set[str]) -> bool:
+        if not seed_ids:
+            return False
+        return bool(VaultRuntime._extract_relation_entity_ids(relation) & seed_ids)
+
+    @staticmethod
+    def _event_matches_seed_ids(event: Dict[str, Any], seed_ids: set[str]) -> bool:
+        if not seed_ids:
+            return False
+        return bool(VaultRuntime._extract_event_entity_ids(event) & seed_ids)
+
+    @staticmethod
+    def _extract_claim_entity_ids(claim: Dict[str, Any]) -> set[str]:
+        ids: set[str] = set()
+        subject = claim.get("subject")
+        if isinstance(subject, str) and subject.strip():
+            ids.add(subject.strip())
+        obj = claim.get("object")
+        if isinstance(obj, str) and obj.strip().startswith("ent_"):
+            ids.add(obj.strip())
+        if isinstance(obj, list):
+            ids.update(
+                str(item).strip()
+                for item in obj
+                if isinstance(item, str) and str(item).strip().startswith("ent_")
+            )
+        return ids
+
+    @staticmethod
+    def _extract_relation_entity_ids(relation: Dict[str, Any]) -> set[str]:
+        ids: set[str] = set()
+        for key in ("source", "target", "source_entity", "target_entity"):
+            value = relation.get(key)
+            if isinstance(value, str) and value.strip():
+                ids.add(value.strip())
+        return ids
+
+    @staticmethod
+    def _extract_event_entity_ids(event: Dict[str, Any]) -> set[str]:
+        ids: set[str] = set()
+        for key in ("entities", "participants"):
+            value = event.get(key)
+            if isinstance(value, list):
+                ids.update(
+                    str(item).strip()
+                    for item in value
+                    if isinstance(item, str) and str(item).strip()
+                )
+        return ids
+
+    @staticmethod
+    def _unique_records_by_key(records: List[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for record in records:
+            value = str(record.get(key, "")).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            result.append(record)
+        return result
+
+    def _split_modeling_context_into_batches(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        entities = list(context.get("entities", []))
+        claims = list(context.get("claims", []))
+        relations = list(context.get("relations", []))
+        events = list(context.get("events", []))
+
+        total_batches = max(
+            1,
+            self._ceil_div(len(entities), self.MODELING_ENTITY_BATCH_SIZE),
+            self._ceil_div(len(claims), self.MODELING_CLAIM_BATCH_SIZE),
+            self._ceil_div(len(relations), self.MODELING_RELATION_BATCH_SIZE),
+            self._ceil_div(len(events), self.MODELING_EVENT_BATCH_SIZE),
+        )
+
+        batches: List[Dict[str, Any]] = []
+        for batch_index in range(total_batches):
+            batch = {
+                "entities": self._slice_batch(
+                    entities,
+                    batch_index,
+                    self.MODELING_ENTITY_BATCH_SIZE,
+                ),
+                "claims": self._slice_batch(
+                    claims,
+                    batch_index,
+                    self.MODELING_CLAIM_BATCH_SIZE,
+                ),
+                "relations": self._slice_batch(
+                    relations,
+                    batch_index,
+                    self.MODELING_RELATION_BATCH_SIZE,
+                ),
+                "events": self._slice_batch(
+                    events,
+                    batch_index,
+                    self.MODELING_EVENT_BATCH_SIZE,
+                ),
+                "governance": context.get("governance", {}),
+            }
+            if any(batch[key] for key in ("entities", "claims", "relations", "events")):
+                batches.append(batch)
+
+        return batches or [context]
+
+    @staticmethod
+    def _ceil_div(value: int, chunk: int) -> int:
+        if not value or not chunk:
+            return 0
+        return (value + chunk - 1) // chunk
+
+    @staticmethod
+    def _slice_batch(items: List[Dict[str, Any]], batch_index: int, batch_size: int) -> List[Dict[str, Any]]:
+        if not items:
+            return []
+        start = batch_index * batch_size
+        end = start + batch_size
+        return items[start:end]
+
+    def _merge_database_payloads(
+        self,
+        payloads: List[Dict[str, Any]],
+        database_spec: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if not payloads:
+            return []
+
+        merged_by_name: Dict[str, Dict[str, Any]] = {}
+        for payload in payloads:
+            name = payload.get("name") or database_spec.get("name", "")
+            if name not in merged_by_name:
+                merged_by_name[name] = {
+                    "name": name,
+                    "title": payload.get("title") or database_spec.get("title", name),
+                    "description": payload.get("description") or database_spec.get("description", ""),
+                    "primary_key": payload.get("primary_key") or database_spec.get("primary_key") or "id",
+                    "columns": list(payload.get("columns", []) or []),
+                    "rows": [],
+                    "visibility": payload.get("visibility") or database_spec.get("visibility", "business"),
+                }
+            target = merged_by_name[name]
+            target["columns"] = self._merge_columns(target.get("columns", []), payload.get("columns", []) or [])
+            target["rows"] = self._merge_rows(
+                target.get("rows", []),
+                payload.get("rows", []) or [],
+                target.get("primary_key", "id"),
+            )
+
+        return list(merged_by_name.values())
+
+    @staticmethod
+    def _merge_columns(existing: List[str], incoming: List[str]) -> List[str]:
+        columns: List[str] = []
+        seen = set()
+        for key in list(existing) + list(incoming):
+            if key not in seen:
+                seen.add(key)
+                columns.append(key)
+        return columns
+
+    @staticmethod
+    def _merge_rows(existing: List[Dict[str, Any]], incoming: List[Dict[str, Any]], primary_key: str) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        index_by_id: Dict[str, int] = {}
+
+        def row_key(row: Dict[str, Any]) -> str:
+            value = row.get(primary_key) or row.get("id") or row.get("entity_id") or row.get("event_id") or row.get("claim_id")
+            return str(value or "")
+
+        for row in existing:
+            normalized = dict(row)
+            key = row_key(normalized)
+            if key:
+                index_by_id[key] = len(merged)
+            merged.append(normalized)
+
+        for row in incoming:
+            normalized = dict(row)
+            key = row_key(normalized)
+            if key and key in index_by_id:
+                target = merged[index_by_id[key]]
+                for field, value in normalized.items():
+                    if value not in (None, "", [], {}):
+                        target[field] = value
+                continue
+            if key:
+                index_by_id[key] = len(merged)
+            merged.append(normalized)
+
+        return merged
 
     @staticmethod
     def _compact_entity_for_modeling(entity: Dict[str, Any]) -> Dict[str, Any]:

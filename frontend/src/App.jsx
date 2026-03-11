@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Bot, Circle, Database, FileText, FileUp, GitBranch, Search, Sparkles, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -155,7 +155,7 @@ const CORE_PHASES = [
   { id: "pipeline", label: "任务收尾", actions: ["pipeline"] },
 ];
 
-export default function App() {
+function AppShell() {
   const initialRoute = typeof window !== "undefined" ? parseHashRoute() : { workspaceId: "", view: "overview" };
   const [workspaces, setWorkspaces] = useState([]);
   const [workspaceId, setWorkspaceId] = useState(initialRoute.workspaceId || "");
@@ -769,6 +769,7 @@ export default function App() {
                   latestTask={latestTask}
                   totalRows={totalRows}
                   activeTasks={activeTasks}
+                  queuedTasks={queuedTasks}
                   completedTasks={completedTasks}
                   staleTasks={staleTasks}
                   trace={trace}
@@ -879,6 +880,50 @@ export default function App() {
           </main>
         </div>
     </div>
+  );
+}
+
+class AppErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error) {
+    console.error("MindVault UI runtime error:", error);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen bg-[var(--background)] px-6 py-10 text-[var(--foreground)]">
+          <div className="mx-auto max-w-3xl border border-[var(--destructive)]/25 bg-[color-mix(in_oklab,var(--destructive)_8%,white)] p-6">
+            <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--destructive)]">前端运行错误</div>
+            <div className="mt-3 text-xl font-semibold">页面没有正常渲染</div>
+            <div className="mt-3 text-sm text-[var(--foreground)]">
+              {String(this.state.error?.message || this.state.error || "未知错误")}
+            </div>
+            <div className="mt-5 flex items-center gap-3">
+              <Button onClick={() => window.location.reload()}>刷新页面</Button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+export default function App() {
+  return (
+    <AppErrorBoundary>
+      <AppShell />
+    </AppErrorBoundary>
   );
 }
 
@@ -1539,7 +1584,8 @@ function WorkspaceGraphView({ nodes, edges, selectedNodeId, onSelectNode }) {
           const position = positions[node.id];
           if (!position) return null;
           const selected = node.id === selectedNodeId;
-          const tone = getNodeColor(node.tableName);
+          const typeTone = getNodeColor(node.tableName);
+          const tone = getNodeVisual(node.id, node.tableName);
           return (
             <button
               key={node.id}
@@ -1564,7 +1610,7 @@ function WorkspaceGraphView({ nodes, edges, selectedNodeId, onSelectNode }) {
                 <div className="truncate font-medium" style={{ color: selected ? tone.strong : "var(--foreground)" }}>
                   {node.label}
                 </div>
-                <div className="mt-1 truncate text-[10px]" style={{ color: tone.accent }}>
+                <div className="mt-1 truncate text-[10px]" style={{ color: typeTone.accent }}>
                   {node.tableTitle}
                 </div>
               </div>
@@ -1580,7 +1626,7 @@ function WorkspaceGraph3DView({ nodes, edges, selectedNodeId, onSelectNode }) {
   const graphData = useMemo(
     () => ({
       nodes: nodes.map((node) => {
-        const tone = getNodeColor(node.tableName);
+        const tone = getNodeVisual(node.id, node.tableName);
         return {
           id: node.id,
           name: node.label,
@@ -1643,6 +1689,7 @@ function OverviewView({
   latestTask,
   totalRows,
   activeTasks,
+  queuedTasks,
   completedTasks,
   staleTasks,
   trace,
@@ -3190,6 +3237,58 @@ function getNodeColor(tableName) {
     soft: "rgba(100,116,139,0.10)",
     border: "rgba(100,116,139,0.24)",
     strong: "#334155",
+  };
+}
+
+function hashString(value) {
+  const text = String(value || "");
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function hexToRgba(hex, alpha) {
+  const value = String(hex || "").replace("#", "");
+  if (value.length !== 6) return `rgba(100,116,139,${alpha})`;
+  const red = Number.parseInt(value.slice(0, 2), 16);
+  const green = Number.parseInt(value.slice(2, 4), 16);
+  const blue = Number.parseInt(value.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function getNodeVisual(nodeId, tableName) {
+  const perNodePalette = [
+    "#2563eb",
+    "#7c3aed",
+    "#ea580c",
+    "#16a34a",
+    "#dc2626",
+    "#0891b2",
+    "#c026d3",
+    "#65a30d",
+    "#d97706",
+    "#0f766e",
+    "#4f46e5",
+    "#be123c",
+    "#9333ea",
+    "#0d9488",
+    "#ca8a04",
+    "#1d4ed8",
+    "#15803d",
+    "#b91c1c",
+    "#7e22ce",
+    "#0369a1",
+  ];
+  const accent = perNodePalette[hashString(nodeId) % perNodePalette.length];
+  const typeTone = getNodeColor(tableName);
+  return {
+    accent,
+    soft: hexToRgba(accent, 0.14),
+    border: hexToRgba(accent, 0.32),
+    strong: accent,
+    typeAccent: typeTone.accent,
   };
 }
 
