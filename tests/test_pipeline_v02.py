@@ -338,6 +338,36 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(len(insights), 1)
         self.assertEqual(insights[0]["title"], "结构概览")
 
+    def test_generate_database_plan_accepts_wrapped_plan_shape(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock(
+            return_value={
+                "database_plan": {
+                    "domain": "测试域",
+                    "generated_at": "2026-03-11T00:00:00",
+                    "databases": [
+                        {
+                            "name": "products",
+                            "title": "产品",
+                            "description": "产品实体",
+                            "entity_types": ["product"],
+                            "suggested_fields": ["id", "name", "type"],
+                            "visibility": "business",
+                        }
+                    ],
+                    "relations": [],
+                }
+            }
+        )
+
+        plan = runtime._generate_database_plan(
+            {"entities": [], "claims": [], "relations": [], "events": []},
+            {"conflicts": {"conflicts": []}, "placeholders": []},
+        )
+
+        self.assertEqual(plan["databases"][0]["name"], "products")
+        self.assertEqual(plan["databases"][0]["row_source"], "entities")
+
     def test_finalize_multi_db_appends_fields_and_infers_relations(self):
         runtime = VaultRuntime(self.workspace)
         database_plan = {
@@ -456,6 +486,92 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertIn("persons", names)
         self.assertIn("products", names)
         self.assertNotIn("usage_records", names)
+
+    def test_generate_multi_db_accepts_single_table_payload_shape(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock(
+            side_effect=[
+                {
+                    "name": "products",
+                    "title": "产品信息表",
+                    "description": "产品实体",
+                    "rows": [
+                        {"id": "prd_1", "name": "OpenClaw", "type": "product"},
+                    ],
+                }
+            ]
+        )
+        database_plan = {
+            "domain": "产品域",
+            "databases": [
+                {
+                    "name": "products",
+                    "title": "产品信息表",
+                    "description": "产品实体",
+                    "suggested_fields": ["id", "name", "type"],
+                    "visibility": "business",
+                    "row_source": "entities",
+                }
+            ],
+            "relations": [],
+        }
+        state = {
+            "entities": [],
+            "claims": [],
+            "relations": [],
+            "events": [],
+        }
+
+        multi_db, warnings = runtime._generate_multi_db(state, database_plan)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(multi_db["databases"]), 1)
+        self.assertEqual(multi_db["databases"][0]["name"], "products")
+        self.assertEqual(multi_db["databases"][0]["rows"][0]["name"], "OpenClaw")
+
+    def test_generate_multi_db_keeps_partial_success_when_one_table_fails(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock(
+            side_effect=[
+                {
+                    "name": "products",
+                    "rows": [{"id": "prd_1", "name": "OpenClaw", "type": "product"}],
+                },
+                {"raw_content": "not structured"},
+            ]
+        )
+        database_plan = {
+            "domain": "产品域",
+            "databases": [
+                {
+                    "name": "products",
+                    "title": "产品",
+                    "suggested_fields": ["id", "name", "type"],
+                    "visibility": "business",
+                    "row_source": "entities",
+                },
+                {
+                    "name": "organizations",
+                    "title": "组织",
+                    "suggested_fields": ["id", "name", "type"],
+                    "visibility": "business",
+                    "row_source": "entities",
+                },
+            ],
+            "relations": [],
+        }
+        state = {
+            "entities": [],
+            "claims": [],
+            "relations": [],
+            "events": [],
+        }
+
+        multi_db, warnings = runtime._generate_multi_db(state, database_plan)
+
+        self.assertEqual([db["name"] for db in multi_db["databases"]], ["products"])
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["table"], "organizations")
 
     def test_task_runtime_persists_state_and_steps(self):
         task_root = self.workspace_path / "tasks"

@@ -19,6 +19,7 @@ class LLMProviderConfig:
     timeout_seconds: int = 120
     max_retries: int = 2
     retry_backoff_seconds: float = 1.0
+    response_format_json: bool = False
 
 
 class LLMClient:
@@ -114,7 +115,7 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
         }
-        if "gpt" in self.config.model.lower():
+        if self.config.response_format_json or "gpt" in self.config.model.lower():
             data["response_format"] = {"type": "json_object"}
         url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
         return url, data

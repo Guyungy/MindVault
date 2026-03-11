@@ -5,6 +5,7 @@
       "base_url": "https://api.siliconflow.cn/v1",
       "api_key": "sk-xcqcptkpzayeqvvkyhmkvsovubkidbizhcybckfwpqkspvnh",
       "model": "deepseek-ai/DeepSeek-V3.2",
+      "response_format_json": true,
       "timeout_seconds": 180,
       "max_retries": 3,
       "retry_backoff_seconds": 1
@@ -14,6 +15,7 @@
       "base_url": "https://api.siliconflow.cn/v1",
       "api_key": "sk-xcqcptkpzayeqvvkyhmkvsovubkidbizhcybckfwpqkspvnh",
       "model": "deepseek-ai/DeepSeek-V3.1-Terminus",
+      "response_format_json": true,
       "timeout_seconds": 180,
       "max_retries": 3,
       "retry_backoff_seconds": 1
@@ -23,6 +25,7 @@
       "base_url": "https://2api.olii.cc/v1",
       "api_key": "sk-f332d5dedf8f487568832ed621adc71b434d5ccadb4e3fbc9766a9ff2fd1c265",
       "model": "gpt-5.2",
+      "response_format_json": true,
       "timeout_seconds": 180,
       "max_retries": 3,
       "retry_backoff_seconds": 1

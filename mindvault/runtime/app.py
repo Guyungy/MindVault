@@ -6,7 +6,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from mindvault.runtime.workspace_store import WorkspaceStore, WorkspaceContext
 from mindvault.runtime.knowledge_store import KnowledgeStore
@@ -226,12 +226,19 @@ class VaultRuntime:
             task.log_step("database_plan", "ok", databases=len(database_plan.get("databases", [])), output=str(database_plan_path))
 
             self._mark_task(task, "multi_db", agent="database_builder_agent", resume_hint="Building structured tables from the approved plan.")
-            multi_db = self._generate_multi_db(state, database_plan)
+            multi_db, multi_db_warnings = self._generate_multi_db(state, database_plan)
             multi_db_paths = self._export_multi_db(database_plan, multi_db)
             self.trace.log("multi_db_export_complete", data=multi_db_paths.get("data", ""))
             for name, value in multi_db_paths.items():
                 task.add_artifact(f"multi_db_{name}", value)
-            task.log_step("multi_db", "ok", output=multi_db_paths.get("data", ""))
+            task.log_step(
+                "multi_db",
+                "ok",
+                output=multi_db_paths.get("data", ""),
+                warnings=len(multi_db_warnings),
+                tables=len(multi_db.get("databases", [])),
+            )
+            optional_failures.extend(multi_db_warnings)
 
             if profile == "full" and report_enabled:
                 report_path = self._run_optional_stage(
@@ -411,16 +418,45 @@ class VaultRuntime:
         context = self._build_modeling_context(state, governance)
         result = self.executor.execute(ontology_agent_path, context)
         self._raise_on_agent_error(result, "ontology_agent")
-        if isinstance(result, dict) and isinstance(result.get("databases"), list):
-            return self._finalize_database_plan(result)
+        normalized = self._normalize_database_plan_result(result)
+        if normalized:
+            return self._finalize_database_plan(normalized)
+        raw_preview = ""
+        if isinstance(result, dict):
+            raw_preview = str(result.get("raw_content", "") or result.get("_raw_content", "")).strip()[:240]
+        if raw_preview:
+            raise RuntimeError(f"ontology_agent returned no structured database plan: {raw_preview}")
         raise RuntimeError("ontology_agent returned no structured database plan")
 
-    def _generate_multi_db(self, state, database_plan: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_database_plan_result(result: Dict[str, Any] | Any) -> Dict[str, Any] | None:
+        if not isinstance(result, dict):
+            return None
+        if isinstance(result.get("databases"), list):
+            return result
+
+        for key in ("database_plan", "plan", "result", "output", "payload"):
+            candidate = result.get(key)
+            if isinstance(candidate, dict) and isinstance(candidate.get("databases"), list):
+                return candidate
+
+        tables = result.get("tables")
+        if isinstance(tables, list):
+            return {
+                "domain": result.get("domain", ""),
+                "generated_at": result.get("generated_at", ""),
+                "databases": tables,
+                "relations": result.get("relations", []),
+            }
+        return None
+
+    def _generate_multi_db(self, state, database_plan: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
         database_builder_agent_path = Path("mindvault/agents/database_builder_agent.yaml")
         if not database_builder_agent_path.exists():
             raise RuntimeError("database_builder_agent definition not found")
         modeling_context = self._build_modeling_context(state)
         built_databases: List[Dict[str, Any]] = []
+        warnings: List[Dict[str, str]] = []
 
         for database_spec in database_plan.get("databases", []):
             single_plan = {
@@ -437,13 +473,37 @@ class VaultRuntime:
                 "database_plan": single_plan,
                 **modeling_context,
             }
-            result = self.executor.execute(database_builder_agent_path, context)
-            self._raise_on_agent_error(result, "database_builder_agent")
-            if not isinstance(result, dict) or not isinstance(result.get("databases"), list):
-                raise RuntimeError(
-                    f"database_builder_agent returned no structured table output for '{database_spec.get('name', '')}'"
+            try:
+                result = self.executor.execute(database_builder_agent_path, context)
+                self._raise_on_agent_error(result, "database_builder_agent")
+                normalized_tables = self._normalize_database_builder_result(result, database_spec)
+                if not normalized_tables:
+                    raise RuntimeError(
+                        f"database_builder_agent returned no structured table output for '{database_spec.get('name', '')}'"
+                    )
+                built_databases.extend(normalized_tables)
+            except Exception as exc:
+                error_text = str(exc)
+                self.trace.log(
+                    "multi_db_table_failed",
+                    table=database_spec.get("name", ""),
+                    error=error_text,
                 )
-            built_databases.extend(result.get("databases", []))
+                warnings.append(
+                    {
+                        "step": "multi_db",
+                        "agent": "database_builder_agent",
+                        "error": error_text,
+                        "table": database_spec.get("name", ""),
+                    }
+                )
+
+        if not built_databases:
+            details = "; ".join(
+                f"{item.get('table', '')}: {item.get('error', '')}"
+                for item in warnings
+            )
+            raise RuntimeError(details or "database_builder_agent produced no usable table output")
 
         merged_payload = {
             "domain": database_plan.get("domain", ""),
@@ -451,7 +511,90 @@ class VaultRuntime:
             "databases": built_databases,
             "relations": database_plan.get("relations", []),
         }
-        return self._finalize_multi_db(merged_payload, database_plan)
+        return self._finalize_multi_db(merged_payload, database_plan), warnings
+
+    def _normalize_database_builder_result(
+        self,
+        result: Dict[str, Any],
+        database_spec: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(result, dict):
+            if isinstance(result, list):
+                return [self._coerce_single_database_payload({"rows": result}, database_spec)]
+            return []
+
+        databases = result.get("databases")
+        if isinstance(databases, list):
+            normalized = []
+            for item in databases:
+                if isinstance(item, dict):
+                    normalized.append(self._coerce_single_database_payload(item, database_spec))
+            return normalized
+
+        database_name = str(database_spec.get("name", "")).strip()
+        direct_candidate = self._extract_single_database_candidate(result, database_name)
+        if direct_candidate is not None:
+            return [self._coerce_single_database_payload(direct_candidate, database_spec)]
+        return []
+
+    def _extract_single_database_candidate(self, result: Dict[str, Any], database_name: str) -> Dict[str, Any] | None:
+        if self._looks_like_single_database_object(result):
+            return result
+
+        for key in ("database", "table", "result", "payload"):
+            candidate = result.get(key)
+            if isinstance(candidate, dict) and self._looks_like_single_database_object(candidate):
+                return candidate
+
+        if database_name:
+            candidate = result.get(database_name)
+            if isinstance(candidate, dict):
+                return candidate
+            if isinstance(candidate, list):
+                return {"name": database_name, "rows": candidate}
+
+        if len(result) == 1:
+            only_value = next(iter(result.values()))
+            if isinstance(only_value, dict) and self._looks_like_single_database_object(only_value):
+                return only_value
+            if isinstance(only_value, list):
+                return {"name": database_name, "rows": only_value}
+        return None
+
+    @staticmethod
+    def _looks_like_single_database_object(candidate: Dict[str, Any]) -> bool:
+        if not isinstance(candidate, dict):
+            return False
+        return any(
+            key in candidate
+            for key in ("rows", "columns", "primary_key", "title", "description", "records", "items")
+        )
+
+    @staticmethod
+    def _coerce_single_database_payload(payload: Dict[str, Any], database_spec: Dict[str, Any]) -> Dict[str, Any]:
+        row_list = payload.get("rows")
+        if not isinstance(row_list, list):
+            row_list = payload.get("records")
+        if not isinstance(row_list, list):
+            row_list = payload.get("items")
+        if not isinstance(row_list, list):
+            row_list = []
+
+        columns = payload.get("columns")
+        if isinstance(columns, dict):
+            columns = list(columns.keys())
+        if not isinstance(columns, list):
+            columns = []
+
+        return {
+            "name": payload.get("name") or database_spec.get("name", ""),
+            "title": payload.get("title") or database_spec.get("title", database_spec.get("name", "")),
+            "description": payload.get("description") or database_spec.get("description", ""),
+            "primary_key": payload.get("primary_key") or database_spec.get("primary_key") or "id",
+            "columns": columns,
+            "rows": row_list,
+            "visibility": payload.get("visibility") or database_spec.get("visibility", "business"),
+        }
 
     def _build_modeling_context(self, state: Dict[str, Any], governance: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return {

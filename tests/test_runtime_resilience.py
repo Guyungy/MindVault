@@ -94,6 +94,7 @@ class RuntimeResilienceTests(unittest.TestCase):
                                 "timeout_seconds": 33,
                                 "max_retries": 5,
                                 "retry_backoff_seconds": 0.2,
+                                "response_format_json": True,
                             }
                         },
                         "routing": {"parse": "p1"},
@@ -108,6 +109,7 @@ class RuntimeResilienceTests(unittest.TestCase):
         self.assertEqual(client.config.timeout_seconds, 33)
         self.assertEqual(client.config.max_retries, 5)
         self.assertAlmostEqual(client.config.retry_backoff_seconds, 0.2)
+        self.assertTrue(client.config.response_format_json)
 
     def test_agent_executor_surfaces_llm_error_in_result(self):
         executor = AgentExecutor(_FakeRouter(_FakeErrorClient()), TraceLogger())
@@ -157,6 +159,20 @@ class RuntimeResilienceTests(unittest.TestCase):
             ]
         }
         self.assertEqual(LLMClient._extract_content("responses", result), "{\"claims\": []}")
+
+    def test_llm_client_sets_json_response_format_for_chat_completions_when_enabled(self):
+        client = LLMClient(
+            LLMProviderConfig(
+                name="p1",
+                base_url="https://example.com/v1",
+                api_key_env="OPENAI_API_KEY",
+                model="deepseek-ai/DeepSeek-V3.1-Terminus",
+                response_format_json=True,
+            )
+        )
+        url, payload = client._build_request("chat_completions", "hello", "system", 0.2)
+        self.assertEqual(url, "https://example.com/v1/chat/completions")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
 
     def test_agent_executor_injects_enabled_skill_context(self):
         fake_client = _FakeClient()

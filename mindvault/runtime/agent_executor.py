@@ -79,6 +79,7 @@ class AgentExecutor:
             has_error="error" in result,
             error=result.get("error", ""),
             output_keys=list(parsed.keys()) if isinstance(parsed, dict) else [],
+            raw_preview=content[:800] if isinstance(content, str) and not isinstance(parsed, dict) else "",
             enabled_skills=self._enabled_skills_for_agent(agent_name),
         )
 
