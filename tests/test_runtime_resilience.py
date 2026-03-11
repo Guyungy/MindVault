@@ -158,6 +158,89 @@ class RuntimeResilienceTests(unittest.TestCase):
         }
         self.assertEqual(LLMClient._extract_content("responses", result), "{\"claims\": []}")
 
+    def test_agent_executor_injects_enabled_skill_context(self):
+        fake_client = _FakeClient()
+        executor = AgentExecutor(_FakeRouter(fake_client), TraceLogger())
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            (td_path / "config").mkdir()
+            (td_path / "skills" / "demo-skill").mkdir(parents=True)
+
+            (td_path / "config" / "skills_registry.json").write_text(
+                json.dumps(
+                    {
+                        "skills": [
+                            {
+                                "id": "demo-skill",
+                                "title": "Demo Skill",
+                                "path": "skills/demo-skill",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (td_path / "config" / "agent_skill_bindings.json").write_text(
+                json.dumps({"agents": {"parse_agent": ["demo-skill"]}}),
+                encoding="utf-8",
+            )
+            (td_path / "skills" / "demo-skill" / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: demo-skill",
+                        "description: Demo skill description",
+                        "---",
+                        "",
+                        "# Demo Skill",
+                        "",
+                        "Always extract more structure.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            prompt_file = td_path / "prompt.md"
+            prompt_file.write_text("{{chunk_text}}", encoding="utf-8")
+            agent_file = td_path / "agent.yaml"
+            agent_file.write_text(
+                "\n".join(
+                    [
+                        "name: parse_agent",
+                        "model_route: parse",
+                        f"prompt_template: {prompt_file}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            executor._project_root = td_path
+            executor._skills_registry_path = td_path / "config" / "skills_registry.json"
+            executor._agent_skill_bindings_path = td_path / "config" / "agent_skill_bindings.json"
+
+            captured = {}
+
+            def _chat(prompt, system_prompt="", max_retries=None, **kwargs):
+                captured["prompt"] = prompt
+                return {"content": '{"claims": [], "entity_candidates": []}'}
+
+            fake_client.chat = _chat
+            executor.execute(agent_file, {"chunk_text": "hello"})
+
+        self.assertIn("[Enabled Skills]", captured["prompt"])
+        self.assertIn("Demo Skill", captured["prompt"])
+        self.assertIn("Always extract more structure.", captured["prompt"])
+
+    def test_database_agents_use_multi_db_route(self):
+        executor = AgentExecutor(_FakeRouter(_FakeClient()), TraceLogger())
+        database_builder = executor.load_agent("mindvault/agents/database_builder_agent.yaml")
+        ontology = executor.load_agent("mindvault/agents/ontology_agent.yaml")
+
+        self.assertEqual(database_builder.get("model_route"), "multi_db")
+        self.assertEqual(ontology.get("model_route"), "multi_db")
+        self.assertEqual(database_builder.get("retry_policy", {}).get("max_retries"), 0)
+        self.assertEqual(ontology.get("retry_policy", {}).get("max_retries"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

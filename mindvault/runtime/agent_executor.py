@@ -25,6 +25,9 @@ class AgentExecutor:
         self.router = model_router
         self.trace = trace_logger
         self._agent_cache: Dict[str, Dict[str, Any]] = {}
+        self._project_root = Path(".")
+        self._skills_registry_path = self._project_root / "config" / "skills_registry.json"
+        self._agent_skill_bindings_path = self._project_root / "config" / "agent_skill_bindings.json"
 
     def load_agent(self, agent_path: str | Path) -> Dict[str, Any]:
         """Load and cache a YAML-like agent definition."""
@@ -47,7 +50,8 @@ class AgentExecutor:
         if prompt_path and Path(prompt_path).exists():
             prompt_template = Path(prompt_path).read_text(encoding="utf-8")
 
-        user_prompt = self._build_prompt(prompt_template, context)
+        skill_context = self._build_skill_context(agent_name)
+        user_prompt = self._build_prompt(prompt_template, context, skill_context)
 
         client = self.router.client_for_task(model_route)
         if client is None:
@@ -70,6 +74,7 @@ class AgentExecutor:
             has_error="error" in result,
             error=result.get("error", ""),
             output_keys=list(parsed.keys()) if isinstance(parsed, dict) else [],
+            enabled_skills=self._enabled_skills_for_agent(agent_name),
         )
 
         if isinstance(parsed, dict):
@@ -84,7 +89,7 @@ class AgentExecutor:
         return response
 
     @staticmethod
-    def _build_prompt(template: str, context: Dict[str, Any]) -> str:
+    def _build_prompt(template: str, context: Dict[str, Any], skill_context: str = "") -> str:
         result = template
         for key, value in context.items():
             placeholder = "{{" + key + "}}"
@@ -93,7 +98,68 @@ class AgentExecutor:
                     result = result.replace(placeholder, json.dumps(value, ensure_ascii=False, indent=2))
                 else:
                     result = result.replace(placeholder, str(value))
+        if skill_context:
+            result = f"{result}\n\n[Enabled Skills]\n{skill_context}\n"
         return result
+
+    def _enabled_skills_for_agent(self, agent_name: str) -> List[str]:
+        bindings = self._read_json(self._agent_skill_bindings_path, {"agents": {}})
+        agents = bindings.get("agents", {}) if isinstance(bindings, dict) else {}
+        values = agents.get(agent_name, [])
+        return [str(item) for item in values if item]
+
+    def _build_skill_context(self, agent_name: str) -> str:
+        enabled_ids = self._enabled_skills_for_agent(agent_name)
+        if not enabled_ids:
+            return ""
+
+        registry = self._read_json(self._skills_registry_path, {"skills": []})
+        registry_items = {
+            item.get("id"): item
+            for item in registry.get("skills", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+
+        chunks: List[str] = []
+        for skill_id in enabled_ids:
+            entry = registry_items.get(skill_id, {})
+            rel_path = entry.get("path", f"skills/{skill_id}")
+            skill_file = self._project_root / rel_path / "SKILL.md"
+            if not skill_file.exists():
+                continue
+            content = skill_file.read_text(encoding="utf-8")
+            title = entry.get("title") or skill_id
+            description = self._extract_skill_description(content)
+            body = self._strip_frontmatter(content).strip()
+            chunks.append(
+                "\n".join(
+                    [
+                        f"## {title}",
+                        f"skill_id: {skill_id}",
+                        f"description: {description}",
+                        body,
+                    ]
+                ).strip()
+            )
+        return "\n\n".join(chunks)
+
+    @staticmethod
+    def _extract_skill_description(content: str) -> str:
+        match = re.search(r"^description:\s*(.+)$", content, flags=re.MULTILINE)
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _strip_frontmatter(content: str) -> str:
+        return re.sub(r"^---\n[\s\S]*?\n---\n?", "", content, count=1)
+
+    @staticmethod
+    def _read_json(path: Path, fallback: Any) -> Any:
+        if not path.exists():
+            return fallback
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return fallback
 
     @staticmethod
     def _try_parse_json(content: str) -> Any:

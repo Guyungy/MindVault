@@ -7,7 +7,16 @@
       "model": "deepseek-ai/DeepSeek-V3.2",
       "timeout_seconds": 180,
       "max_retries": 3,
-      "retry_backoff_seconds": 1.0
+      "retry_backoff_seconds": 1
+    },
+    "siliconflow_deepseek_v31_terminus": {
+      "title": "硅基流动 DeepSeek V3.1 Terminus",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "api_key": "sk-xcqcptkpzayeqvvkyhmkvsovubkidbizhcybckfwpqkspvnh",
+      "model": "deepseek-ai/DeepSeek-V3.1-Terminus",
+      "timeout_seconds": 180,
+      "max_retries": 3,
+      "retry_backoff_seconds": 1
     },
     "gpt52_model": {
       "title": "2API GPT-5.2",
@@ -16,12 +25,13 @@
       "model": "gpt-5.2",
       "timeout_seconds": 180,
       "max_retries": 3,
-      "retry_backoff_seconds": 1.0
+      "retry_backoff_seconds": 1
     }
   },
   "routing": {
-    "parse": "siliconflow_deepseek_v32",
-    "insight": "siliconflow_deepseek_v32",
-    "report": "siliconflow_deepseek_v32"
+    "parse": "siliconflow_deepseek_v31_terminus",
+    "insight": "siliconflow_deepseek_v31_terminus",
+    "report": "siliconflow_deepseek_v31_terminus",
+    "multi_db": "siliconflow_deepseek_v31_terminus"
   }
 }

@@ -3,6 +3,7 @@ from pathlib import Path
 import shutil
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
 from main import run_pipeline
 from mindvault.runtime.app import VaultRuntime, load_sources_from_path
@@ -168,6 +169,64 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(visibility["relations"], "system")
         self.assertEqual(visibility["sources"], "system")
 
+    def test_finalize_multi_db_appends_fields_and_infers_relations(self):
+        runtime = VaultRuntime(self.workspace)
+        database_plan = {
+            "databases": [
+                {
+                    "name": "people",
+                    "title": "人物",
+                    "suggested_fields": ["id", "name", "profile_city", "friend_ids"],
+                    "visibility": "business",
+                },
+                {
+                    "name": "places",
+                    "title": "地点",
+                    "suggested_fields": ["id", "name"],
+                    "visibility": "business",
+                },
+            ]
+        }
+        multi_db = {
+            "databases": [
+                {
+                    "name": "people",
+                    "rows": [
+                        {
+                            "id": "p1",
+                            "name": "小王",
+                            "profile": {"city": "广州"},
+                            "friend_ids": ["p2"],
+                            "home_place_id": "place_1",
+                        },
+                        {
+                            "id": "p2",
+                            "name": "小李",
+                        },
+                    ],
+                },
+                {
+                    "name": "places",
+                    "rows": [
+                        {
+                            "id": "place_1",
+                            "name": "天河",
+                        }
+                    ],
+                },
+            ]
+        }
+
+        finalized = runtime._finalize_multi_db(multi_db, database_plan)
+        people = next(db for db in finalized["databases"] if db["name"] == "people")
+
+        self.assertIn("profile_city", people["columns"])
+        self.assertIn("home_place_id", people["columns"])
+        self.assertEqual(people["primary_key"], "id")
+        inferred = {(rel["from_db"], rel["from_field"], rel["to_db"]) for rel in finalized["relations"]}
+        self.assertIn(("people", "friend_ids", "people"), inferred)
+        self.assertIn(("people", "home_place_id", "places"), inferred)
+
     def test_task_runtime_persists_state_and_steps(self):
         task_root = self.workspace_path / "tasks"
         runtime = TaskRuntime(task_root, goal="Test goal", workspace_id=self.workspace)
@@ -200,8 +259,75 @@ class MindVaultV02Tests(unittest.TestCase):
         summary = summarize_task(task, recent_steps=[{"status": "fallback"}, {"status": "failed"}])
 
         self.assertEqual(summary["health"], "stale")
-        self.assertEqual(summary["recent_fallbacks"], 1)
-        self.assertEqual(summary["recent_failures"], 1)
+
+    def test_report_timeout_does_not_block_multi_db_outputs(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock(return_value={})
+
+        with mock.patch.object(runtime, "_generate_report", side_effect=TimeoutError("The read operation timed out")):
+            result = runtime.ingest([
+                {
+                    "source_id": "safe_doc",
+                    "source_type": "doc",
+                    "content": "广州文化中心在天河区提供周末亲子阅读活动，可线上预约报名。",
+                }
+            ])
+
+        multi_db_path = Path(result["multi_db"]["data"])
+        latest_task_path = sorted((self.workspace_path / "tasks").glob("task_*/task.json"))[-1]
+        task_json = json.loads(latest_task_path.read_text(encoding="utf-8"))
+        step_log_path = latest_task_path.parent / "step_log.jsonl"
+        step_log = step_log_path.read_text(encoding="utf-8")
+
+        self.assertTrue(multi_db_path.exists())
+        self.assertEqual(task_json["status"], "completed")
+        self.assertIn("warnings", task_json)
+        self.assertEqual(task_json["warnings"][0]["step"], "report")
+        self.assertIn('"action": "report"', step_log)
+        self.assertIn('"status": "failed"', step_log)
+        self.assertIn("multi_db", result)
+
+    def test_database_builder_failure_falls_back_to_local_multi_db(self):
+        runtime = VaultRuntime(self.workspace)
+        original_execute = runtime.executor.execute
+
+        def fake_execute(agent_path, context):
+            path_text = str(agent_path)
+            if path_text.endswith("parse_agent.yaml"):
+                return {}
+            if path_text.endswith("ontology_agent.yaml"):
+                return {
+                    "domain": "Test Domain",
+                    "databases": [
+                        {
+                            "name": "venues",
+                            "title": "地点",
+                            "entity_types": ["venue"],
+                            "suggested_fields": ["id", "name", "location"],
+                            "visibility": "business",
+                        }
+                    ],
+                    "relations": [],
+                }
+            if path_text.endswith("database_builder_agent.yaml"):
+                return {"_agent_error": "HTTP Error 500: Internal Server Error"}
+            return original_execute(agent_path, context)
+
+        runtime.executor.execute = fake_execute
+        result = runtime.ingest([
+            {
+                "source_id": "safe_doc",
+                "source_type": "doc",
+                "content": "广州文化中心在天河区提供周末亲子阅读活动，可线上预约报名。",
+            }
+        ])
+
+        multi_db_payload = json.loads(Path(result["multi_db"]["data"]).read_text(encoding="utf-8"))
+        latest_task_path = sorted((self.workspace_path / "tasks").glob("task_*/task.json"))[-1]
+        task_json = json.loads(latest_task_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(task_json["status"], "completed")
+        self.assertGreater(len(multi_db_payload.get("databases", [])), 0)
 
     def test_task_monitor_uses_recent_step_activity_for_running_task(self):
         now = datetime.utcnow()

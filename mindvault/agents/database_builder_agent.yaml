@@ -10,11 +10,11 @@ input_artifacts:
 output_artifacts:
   - multi_db_json
 
-model_route: report
+model_route: multi_db
 prompt_template: mindvault/prompts/database_builder_agent.md
 
 retry_policy:
-  max_retries: 2
+  max_retries: 0
   fallback: template_fallback
 
 chunk_strategy: single

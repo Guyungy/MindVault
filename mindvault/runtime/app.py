@@ -81,6 +81,7 @@ class VaultRuntime:
         task.start()
         self.trace.log("pipeline_start", workspace=self.ctx.workspace_id, source_count=len(sources), task_id=task.task_id)
         task.log_step("pipeline_start", "ok", source_count=len(sources))
+        optional_failures: List[Dict[str, str]] = []
 
         try:
             self._mark_task(task, "ingest", resume_hint="Persisting raw sources.")
@@ -222,19 +223,6 @@ class VaultRuntime:
             self.trace.log("insight_complete", count=len(insights))
             task.log_step("insight", "ok", count=len(insights))
 
-            self._mark_task(task, "report", agent="report_agent", resume_hint="Writing report artifact.")
-            report_data = self._generate_report(state, insights, governance)
-            self.ctx.report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
-            self.trace.log("report_complete")
-            task.add_artifact("report", str(self.ctx.report_path))
-            task.log_step("report", "ok", output=str(self.ctx.report_path))
-
-            self._mark_task(task, "dashboard", agent="dashboard_renderer", resume_hint="Rendering dashboard.")
-            dashboard_path = self._render_dashboard(state, governance, version_meta)
-            self.trace.log("dashboard_complete")
-            task.add_artifact("dashboard", dashboard_path)
-            task.log_step("dashboard", "ok", output=dashboard_path)
-
             self._mark_task(task, "multi_db", agent="database_builder_agent", resume_hint="Building database plan and multi-db outputs.")
             database_plan = self._generate_database_plan(state, governance)
             multi_db = self._generate_multi_db(state, database_plan)
@@ -244,18 +232,45 @@ class VaultRuntime:
                 task.add_artifact(f"multi_db_{name}", value)
             task.log_step("multi_db", "ok", output=multi_db_paths.get("data", ""))
 
-            self._mark_task(task, "wiki", agent="wiki_builder_agent", resume_hint="Rendering wiki pages.")
-            wiki_paths = self._export_wiki(state, governance, version_meta)
-            self.trace.log("wiki_export_complete", index=wiki_paths.get("index", ""))
-            for name, value in wiki_paths.items():
-                if isinstance(value, str):
-                    task.add_artifact(f"wiki_{name}", value)
-            task.log_step("wiki", "ok", output=wiki_paths.get("index", ""))
+            report_path = self._run_optional_stage(
+                task=task,
+                step="report",
+                agent="report_agent",
+                resume_hint="Writing report artifact.",
+                runner=lambda: self._write_report(state, insights, governance),
+                optional_failures=optional_failures,
+            )
+
+            dashboard_path = self._run_optional_stage(
+                task=task,
+                step="dashboard",
+                agent="dashboard_renderer",
+                resume_hint="Rendering dashboard.",
+                runner=lambda: self._render_dashboard(state, governance, version_meta),
+                optional_failures=optional_failures,
+            )
+
+            wiki_paths = self._run_optional_stage(
+                task=task,
+                step="wiki",
+                agent="wiki_builder_agent",
+                resume_hint="Rendering wiki pages.",
+                runner=lambda: self._export_wiki(state, governance, version_meta),
+                optional_failures=optional_failures,
+            ) or {}
+            if isinstance(wiki_paths, dict):
+                for name, value in wiki_paths.items():
+                    if isinstance(value, str):
+                        task.add_artifact(f"wiki_{name}", value)
 
             trace_path = self.ctx.root_dir / "agent_trace.json"
             self.trace.save(trace_path)
             task.add_artifact("trace", str(trace_path))
-            task.complete("Pipeline completed successfully.")
+            if optional_failures:
+                task.state["warnings"] = optional_failures
+                task.complete("Pipeline completed with warnings.")
+            else:
+                task.complete("Pipeline completed successfully.")
 
             return {
                 "workspace": self.ctx.workspace_id,
@@ -267,11 +282,12 @@ class VaultRuntime:
                 "knowledge_base": str(self.ctx.kb_path),
                 "snapshot": version_meta.get("snapshot_path", ""),
                 "changelog": version_meta.get("changelog_path", ""),
-                "report": str(self.ctx.report_path),
-                "dashboard": dashboard_path,
+                "report": report_path or "",
+                "dashboard": dashboard_path or "",
                 "multi_db": multi_db_paths,
                 "wiki": wiki_paths,
                 "trace": str(trace_path),
+                "warnings": optional_failures,
                 "stats": {
                     "sources": len(sources),
                     "chunks": len(all_chunks),
@@ -377,6 +393,11 @@ class VaultRuntime:
             ]
         }
 
+    def _write_report(self, state, insights, governance) -> str:
+        report_data = self._generate_report(state, insights, governance)
+        self.ctx.report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        return str(self.ctx.report_path)
+
     def _render_dashboard(self, state, governance, version_meta) -> str:
         from mindvault.runtime.renderers.dashboard import DashboardRenderer
         renderer = DashboardRenderer(str(self.ctx.visualization_dir))
@@ -401,10 +422,13 @@ class VaultRuntime:
                 "events": state.get("events", []),
                 "governance": governance,
             }
-            result = self.executor.execute(ontology_agent_path, context)
-            self._raise_on_agent_error(result, "ontology_agent")
-            if isinstance(result, dict) and isinstance(result.get("databases"), list):
-                return self._finalize_database_plan(result)
+            try:
+                result = self.executor.execute(ontology_agent_path, context)
+                self._raise_on_agent_error(result, "ontology_agent")
+                if isinstance(result, dict) and isinstance(result.get("databases"), list):
+                    return self._finalize_database_plan(result)
+            except Exception as exc:
+                self.trace.log("database_plan_fallback", agent="ontology_agent", error=str(exc))
         return self._finalize_database_plan(self._fallback_database_plan(state))
 
     def _generate_multi_db(self, state, database_plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -417,10 +441,13 @@ class VaultRuntime:
                 "relations": state.get("relations", []),
                 "events": state.get("events", []),
             }
-            result = self.executor.execute(database_builder_agent_path, context)
-            self._raise_on_agent_error(result, "database_builder_agent")
-            if isinstance(result, dict) and isinstance(result.get("databases"), list):
-                return self._finalize_multi_db(result, database_plan)
+            try:
+                result = self.executor.execute(database_builder_agent_path, context)
+                self._raise_on_agent_error(result, "database_builder_agent")
+                if isinstance(result, dict) and isinstance(result.get("databases"), list):
+                    return self._finalize_multi_db(result, database_plan)
+            except Exception as exc:
+                self.trace.log("multi_db_fallback", agent="database_builder_agent", error=str(exc))
         return self._finalize_multi_db(self._fallback_multi_db(state, database_plan), database_plan)
 
     def _generate_wiki_payload(self, state, governance, version_meta) -> Dict[str, Any] | None:
@@ -446,6 +473,42 @@ class VaultRuntime:
     def _raise_on_agent_error(result: Dict[str, Any] | Any, agent_name: str) -> None:
         if isinstance(result, dict) and result.get("_agent_error"):
             raise RuntimeError(f"{agent_name} failed: {result['_agent_error']}")
+
+    def _run_optional_stage(
+        self,
+        *,
+        task: TaskRuntime,
+        step: str,
+        agent: str,
+        resume_hint: str,
+        runner,
+        optional_failures: List[Dict[str, str]],
+    ) -> Any:
+        self._mark_task(task, step, agent=agent, resume_hint=resume_hint)
+        try:
+            result = runner()
+            self.trace.log(f"{step}_complete")
+            if isinstance(result, dict):
+                output = result.get("index", "") or result.get("data", "")
+                task.log_step(step, "ok", output=output)
+            else:
+                task.log_step(step, "ok", output=result or "")
+            if step == "report" and isinstance(result, str):
+                task.add_artifact("report", result)
+            if step == "dashboard" and isinstance(result, str):
+                task.add_artifact("dashboard", result)
+            return result
+        except Exception as exc:
+            error_text = str(exc)
+            optional_failures.append({
+                "step": step,
+                "agent": agent,
+                "error": error_text,
+            })
+            self.trace.log("optional_stage_failed", stage=step, agent=agent, error=error_text)
+            task.log_step(step, "failed", agent=agent, error=error_text)
+            task.heartbeat(step=step, agent=agent, resume_hint=f"{step} failed: {error_text}")
+            return None
 
     def _fallback_database_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
         entity_types = sorted({entity.get("type", "unknown") for entity in state.get("entities", [])})
@@ -503,13 +566,14 @@ class VaultRuntime:
                     for entity in entities
                     if not entity_types or entity.get("type") in entity_types
                 ]
+            rows = [self._normalize_row_shape(item) for item in rows]
             columns = self._collect_columns(rows)
             databases.append({
                 "name": name,
                 "title": database.get("title", name),
                 "description": database.get("description", ""),
                 "visibility": database.get("visibility", self._infer_database_visibility(name)),
-                "primary_key": "id",
+                "primary_key": self._infer_primary_key(columns),
                 "columns": columns,
                 "rows": rows,
             })
@@ -518,7 +582,10 @@ class VaultRuntime:
             "domain": database_plan.get("domain", "MindVault Multi-DB"),
             "generated_at": datetime.utcnow().isoformat(),
             "databases": databases,
-            "relations": self._fallback_relation_defs(state, database_plan.get("databases", [])),
+            "relations": self._merge_relation_defs(
+                self._fallback_relation_defs(state, database_plan.get("databases", [])),
+                self._infer_relations_from_multi_db(databases),
+            ),
         }
 
     def _finalize_database_plan(self, database_plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -539,11 +606,21 @@ class VaultRuntime:
         for database in payload.get("databases", []):
             row = dict(database)
             plan_row = plan_map.get(row.get("name", ""), {})
+            rows = [self._normalize_row_shape(item) for item in row.get("rows", [])]
+            inferred_columns = self._collect_columns(rows)
+            planned_fields = [field for field in plan_row.get("suggested_fields", []) if field not in inferred_columns]
             row.setdefault("title", plan_row.get("title", row.get("name", "")))
             row.setdefault("description", plan_row.get("description", ""))
             row.setdefault("visibility", plan_row.get("visibility", self._infer_database_visibility(row.get("name", ""))))
+            row["rows"] = rows
+            row["columns"] = inferred_columns + planned_fields
+            row.setdefault("primary_key", self._infer_primary_key(row["columns"]))
             normalized.append(row)
         payload["databases"] = normalized
+        payload["relations"] = self._merge_relation_defs(
+            payload.get("relations", []),
+            self._infer_relations_from_multi_db(normalized),
+        )
         return payload
 
     def _fallback_relation_defs(self, state: Dict[str, Any], databases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -596,6 +673,7 @@ class VaultRuntime:
     def _flatten_entity_row(entity: Dict[str, Any]) -> Dict[str, Any]:
         row = {
             "id": entity.get("id", ""),
+            "entity_id": entity.get("id", ""),
             "name": entity.get("name", ""),
             "type": entity.get("type", ""),
             "confidence": entity.get("confidence", 0),
@@ -609,9 +687,11 @@ class VaultRuntime:
     def _flatten_claim_row(claim: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "id": claim.get("id", claim.get("claim_id", "")),
+            "claim_id": claim.get("id", claim.get("claim_id", "")),
             "subject": claim.get("subject", ""),
             "predicate": claim.get("predicate", ""),
             "object": claim.get("object", ""),
+            "claim_text": claim.get("claim_text", ""),
             "claim_type": claim.get("claim_type", ""),
             "confidence": claim.get("confidence", 0),
             "source_ref": claim.get("source_ref", ""),
@@ -621,6 +701,7 @@ class VaultRuntime:
     def _flatten_relation_row(relation: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "id": f"{relation.get('source', '')}:{relation.get('relation', '')}:{relation.get('target', '')}",
+            "relation_id": f"{relation.get('source', '')}:{relation.get('relation', '')}:{relation.get('target', '')}",
             "source": relation.get("source", ""),
             "relation": relation.get("relation", ""),
             "target": relation.get("target", ""),
@@ -650,6 +731,78 @@ class VaultRuntime:
                     seen.add(key)
                     columns.append(key)
         return columns or ["id"]
+
+    @staticmethod
+    def _normalize_row_shape(row: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for key, value in row.items():
+            if isinstance(value, dict):
+                flattened = {
+                    f"{key}_{child_key}": child_value
+                    for child_key, child_value in value.items()
+                    if not isinstance(child_value, (dict, list))
+                }
+                if flattened:
+                    normalized.update(flattened)
+                else:
+                    normalized[key] = value
+            else:
+                normalized[key] = value
+        return normalized
+
+    @staticmethod
+    def _infer_primary_key(columns: List[str]) -> str:
+        for candidate in ["id", "entity_id", "event_id", "claim_id", "relation_id", "source_id", "name", "title"]:
+            if candidate in columns:
+                return candidate
+        return columns[0] if columns else "id"
+
+    def _infer_relations_from_multi_db(self, databases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        id_registry: Dict[str, tuple[str, str]] = {}
+        for database in databases:
+            db_name = database.get("name", "")
+            primary_key = database.get("primary_key", "id")
+            for row in database.get("rows", []):
+                value = row.get(primary_key) or row.get("id") or row.get("entity_id") or row.get("event_id") or row.get("claim_id")
+                if value:
+                    id_registry[str(value)] = (db_name, primary_key if primary_key in row else "id")
+
+        relation_defs: List[Dict[str, Any]] = []
+        for database in databases:
+            from_db = database.get("name", "")
+            for row in database.get("rows", []):
+                for field, value in row.items():
+                    targets = value if isinstance(value, list) else [value]
+                    for target in targets:
+                        if not isinstance(target, str):
+                            continue
+                        target_meta = id_registry.get(target)
+                        if not target_meta:
+                            continue
+                        to_db, to_field = target_meta
+                        if from_db == to_db and field == to_field:
+                            continue
+                        relation_defs.append({
+                            "from_db": from_db,
+                            "from_field": field,
+                            "to_db": to_db,
+                            "to_field": to_field,
+                            "relation_type": "many_to_many" if isinstance(value, list) else "many_to_one",
+                        })
+        return relation_defs
+
+    @staticmethod
+    def _merge_relation_defs(*relation_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen = set()
+        for group in relation_groups:
+            for row in group or []:
+                key = tuple(row.get(k, "") for k in ["from_db", "from_field", "to_db", "to_field", "relation_type"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(row)
+        return merged
 
     @staticmethod
     def _entity_type_for_id(entities: List[Dict[str, Any]], entity_id: str) -> str:

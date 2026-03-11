@@ -4,20 +4,25 @@ import { cva } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 rounded-xl text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[calc(var(--radius)-0.02rem)] text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
-        default: "bg-stone-900 text-stone-50 hover:bg-stone-800",
-        outline: "border border-stone-300 bg-white text-stone-900 hover:bg-stone-50",
-        ghost: "text-stone-700 hover:bg-stone-100",
-        nav: "w-full justify-start rounded-lg border border-transparent bg-transparent text-stone-600 hover:bg-stone-100 hover:text-stone-900",
-        activeNav: "w-full justify-start rounded-lg bg-teal-50 text-teal-900",
+        default:
+          "bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-92",
+        outline:
+          "border border-[var(--border)]/70 bg-[var(--background)] text-[var(--foreground)] hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]",
+        ghost:
+          "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]",
+        nav:
+          "w-full justify-start rounded-[calc(var(--radius)-0.02rem)] bg-transparent text-[var(--sidebar-foreground)]/72 hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]",
+        activeNav:
+          "w-full justify-start rounded-[calc(var(--radius)-0.02rem)] bg-[var(--sidebar-accent)] text-[var(--sidebar-primary)]",
       },
       size: {
-        default: "h-10 px-4 py-2",
-        sm: "h-8 rounded-lg px-3 text-xs",
-        lg: "h-11 px-6",
+        default: "h-8 px-3 py-1.5",
+        sm: "h-6 rounded-[calc(var(--radius)-0.02rem)] px-2 text-[10px]",
+        lg: "h-9 px-4",
       },
     },
     defaultVariants: {

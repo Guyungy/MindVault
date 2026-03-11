@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
-import { readFile, readdir, stat, writeFile, mkdir } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile, mkdir, mkdtemp, cp } from "node:fs/promises";
 import { createReadStream, existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Busboy from "busboy";
@@ -15,6 +16,9 @@ const publicDir = existsSync(distDir) ? distDir : path.join(__dirname, "public")
 const workspacesDir = path.join(rootDir, "output", "workspaces");
 const agentsDir = path.join(rootDir, "mindvault", "agents");
 const modelConfigPath = path.join(rootDir, "config", "model_config.json");
+const skillsDir = path.join(rootDir, "skills");
+const skillsRegistryPath = path.join(rootDir, "config", "skills_registry.json");
+const agentSkillBindingsPath = path.join(rootDir, "config", "agent_skill_bindings.json");
 const port = Number(process.env.PORT || 4310);
 const host = process.env.HOST || "127.0.0.1";
 
@@ -49,6 +53,26 @@ const server = createServer(async (req, res) => {
     return sendJson(res, await listAgentSpecs());
   }
 
+  if (url.pathname === "/api/skills") {
+    if (req.method === "GET") {
+      return sendJson(res, await listSkills());
+    }
+    if (req.method === "POST") {
+      return handleSkillInstall(req, res);
+    }
+  }
+
+  if (url.pathname.startsWith("/api/skills/")) {
+    const suffix = decodeURIComponent(url.pathname.replace("/api/skills/", "").replace(/\/$/, ""));
+    if (suffix.endsWith("/sync") && req.method === "POST") {
+      const skillId = suffix.replace(/\/sync$/, "");
+      return handleSkillSync(res, skillId);
+    }
+    if (req.method === "PUT") {
+      return handleSkillUpdate(req, res, suffix);
+    }
+  }
+
   if (url.pathname === "/api/models") {
     if (req.method === "GET") {
       return sendJson(res, await readModelConfig());
@@ -77,6 +101,9 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname.startsWith("/api/workspaces/")) {
     const workspaceId = decodeURIComponent(url.pathname.replace("/api/workspaces/", "").replace(/\/$/, ""));
+    if (req.method === "DELETE") {
+      return handleWorkspaceDelete(res, workspaceId);
+    }
     return sendJson(res, await readWorkspacePayload(workspaceId), 200);
   }
 
@@ -85,6 +112,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, host, () => {
   console.log(`MindVault frontend: http://${host}:${port}`);
+  void maybeAutoUpdateSkills();
 });
 
 async function listWorkspaces() {
@@ -168,6 +196,24 @@ async function handleWorkspaceCreate(req, res) {
   }
 }
 
+async function handleWorkspaceDelete(res, workspaceId) {
+  try {
+    const safeId = sanitizeWorkspaceId(workspaceId);
+    const workspaceRoot = path.join(workspacesDir, safeId);
+    if (!existsSync(workspaceRoot)) {
+      return sendJson(res, { error: "workspace not found" }, 404);
+    }
+    await rm(workspaceRoot, { recursive: true, force: true });
+    return sendJson(res, {
+      success: true,
+      workspace: safeId,
+      message: "工作空间已删除。",
+    });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
+}
+
 async function listAgentSpecs() {
   if (!existsSync(agentsDir)) return { agents: [] };
   const entries = await readdir(agentsDir);
@@ -196,6 +242,7 @@ async function readAgentSpec(agentName) {
   const promptRelativePath = extractPromptTemplatePath(configContent);
   const promptPath = promptRelativePath ? path.join(rootDir, promptRelativePath) : "";
   const promptContent = promptPath && existsSync(promptPath) ? await readFile(promptPath, "utf-8") : "";
+  const bindings = await readAgentSkillBindings();
   return {
     name: agentName,
     role: extractRole(configContent),
@@ -203,6 +250,7 @@ async function readAgentSpec(agentName) {
     promptPath: promptPath ? toWorkspaceRelative(promptPath) : "",
     configContent,
     promptContent,
+    enabledSkills: bindings.agents?.[agentName] || [],
   };
 }
 
@@ -270,11 +318,98 @@ async function handleAgentUpdate(req, res, agentName) {
       await mkdir(path.dirname(promptPath), { recursive: true });
       await writeFile(promptPath, body.promptContent, "utf-8");
     }
+    if (Array.isArray(body.enabledSkills)) {
+      const bindings = await readAgentSkillBindings();
+      bindings.agents = {
+        ...(bindings.agents || {}),
+        [agentName]: body.enabledSkills.filter(Boolean),
+      };
+      await writeAgentSkillBindings(bindings);
+    }
     return sendJson(res, {
       success: true,
       agent: await readAgentSpec(agentName),
       message: "智能体提示词已保存。",
     });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
+}
+
+async function readAgentSkillBindings() {
+  return readJsonSafe(agentSkillBindingsPath, { agents: {} });
+}
+
+async function writeAgentSkillBindings(payload) {
+  await writeFile(agentSkillBindingsPath, JSON.stringify(payload, null, 2), "utf-8");
+}
+
+async function listSkills() {
+  const registry = await readSkillsRegistry();
+  const skills = await Promise.all(
+    (registry.skills || []).map(async (entry) => enrichSkillEntry(entry)),
+  );
+  return { skills };
+}
+
+async function handleSkillInstall(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const sourceUrl = String(body?.sourceUrl || "").trim();
+    if (!sourceUrl) {
+      return sendJson(res, { error: "sourceUrl is required" }, 400);
+    }
+    const installResult = await installSkillFromGithubUrl(sourceUrl);
+    const registry = await readSkillsRegistry();
+    const existingIndex = (registry.skills || []).findIndex((skill) => skill.id === installResult.id);
+    const nextEntry = {
+      id: installResult.id,
+      title: installResult.title,
+      path: installResult.path,
+      source: {
+        type: "github",
+        url: sourceUrl,
+      },
+      auto_update: body?.autoUpdate !== false,
+      status: "installed",
+      last_updated_at: new Date().toISOString(),
+      last_checked_at: new Date().toISOString(),
+    };
+    if (existingIndex >= 0) {
+      registry.skills[existingIndex] = { ...registry.skills[existingIndex], ...nextEntry };
+    } else {
+      registry.skills = [...(registry.skills || []), nextEntry];
+    }
+    await writeSkillsRegistry(registry);
+    return sendJson(res, { success: true, message: "技能已安装。", skill: await enrichSkillEntry(nextEntry) });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
+}
+
+async function handleSkillUpdate(req, res, skillId) {
+  try {
+    const body = await readJsonBody(req);
+    const registry = await readSkillsRegistry();
+    const index = (registry.skills || []).findIndex((skill) => skill.id === skillId);
+    if (index < 0) {
+      return sendJson(res, { error: "skill not found" }, 404);
+    }
+    registry.skills[index] = {
+      ...registry.skills[index],
+      auto_update: body?.auto_update ?? registry.skills[index].auto_update ?? false,
+    };
+    await writeSkillsRegistry(registry);
+    return sendJson(res, { success: true, skill: await enrichSkillEntry(registry.skills[index]) });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
+}
+
+async function handleSkillSync(res, skillId) {
+  try {
+    const result = await syncSkillById(skillId);
+    return sendJson(res, { success: true, ...result });
   } catch (error) {
     return sendJson(res, { error: error.message }, 500);
   }
@@ -300,24 +435,175 @@ async function readWorkspacePayload(workspaceId) {
   ]);
   const normalizedPlan = applyDatabaseVisibility(plan);
   const normalizedMultiDb = applyDatabaseVisibility(multiDb, normalizedPlan);
-  const multiDbWithSourceCards = injectSourceCardsTable(normalizedMultiDb, rawSources);
   const recentSources = Array.isArray(rawSources) ? rawSources.slice(-8).reverse() : [];
   const tasksWithImpact = tasks.map((task) => ({
     ...task,
-    impact: summarizeTaskImpact(task, rawSources, multiDbWithSourceCards),
+    impact: summarizeTaskImpact(task, rawSources, normalizedMultiDb),
   }));
   const latestTask = tasksWithImpact[0] || null;
 
   return {
     workspace: workspaceId,
-    tables: multiDbWithSourceCards.databases || [],
-    multiDb: multiDbWithSourceCards,
+    tables: normalizedMultiDb.databases || [],
+    multiDb: normalizedMultiDb,
     databasePlan: normalizedPlan,
     trace,
     tasks: tasksWithImpact,
     latestTask,
     recentSources,
   };
+}
+
+async function readSkillsRegistry() {
+  const registry = await readJsonSafe(skillsRegistryPath, { skills: [] });
+  return {
+    skills: Array.isArray(registry.skills) ? registry.skills : [],
+  };
+}
+
+async function writeSkillsRegistry(registry) {
+  await writeFile(skillsRegistryPath, JSON.stringify(registry, null, 2), "utf-8");
+}
+
+async function enrichSkillEntry(entry) {
+  const skillPath = path.join(rootDir, entry.path || "");
+  const exists = existsSync(skillPath);
+  const manifestPath = path.join(skillPath, "SKILL.md");
+  const manifest = existsSync(manifestPath) ? await readFile(manifestPath, "utf-8") : "";
+  const meta = extractSkillFrontmatter(manifest);
+  return {
+    ...entry,
+    title: entry.title || meta.name || entry.id,
+    description: meta.description || "",
+    exists,
+    manifestPath: exists ? toWorkspaceRelative(manifestPath) : "",
+  };
+}
+
+function extractSkillFrontmatter(content) {
+  const match = String(content || "").match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return { name: "", description: "" };
+  const yaml = match[1];
+  const name = (yaml.match(/^name:\s*(.+)$/m)?.[1] || "").trim();
+  const description = (yaml.match(/^description:\s*(.+)$/m)?.[1] || "").trim();
+  return { name, description };
+}
+
+async function installSkillFromGithubUrl(sourceUrl) {
+  await mkdir(skillsDir, { recursive: true });
+  await runInstaller(sourceUrl, skillsDir);
+  const parsed = parseSkillGithubUrl(sourceUrl);
+  const skillId = path.basename(parsed.skillPath);
+  const skillPath = path.join(skillsDir, skillId);
+  const manifest = existsSync(path.join(skillPath, "SKILL.md"))
+    ? await readFile(path.join(skillPath, "SKILL.md"), "utf-8")
+    : "";
+  const meta = extractSkillFrontmatter(manifest);
+  return {
+    id: skillId,
+    title: meta.name || skillId,
+    path: toWorkspaceRelative(skillPath),
+  };
+}
+
+function parseSkillGithubUrl(sourceUrl) {
+  const match = String(sourceUrl).match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)$/);
+  if (!match) {
+    throw new Error("暂只支持 GitHub tree URL。");
+  }
+  return {
+    owner: match[1],
+    repo: match[2],
+    ref: match[3],
+    skillPath: match[4],
+  };
+}
+
+function runInstaller(sourceUrl, destDir) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "python3",
+      [
+        "/Users/a1/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py",
+        "--url",
+        sourceUrl,
+        "--dest",
+        destDir,
+      ],
+      { cwd: rootDir },
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf-8");
+    });
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(stderr.trim() || `installer exited with ${code}`));
+      }
+    });
+    child.on("error", reject);
+  });
+}
+
+async function syncSkillById(skillId) {
+  const registry = await readSkillsRegistry();
+  const index = (registry.skills || []).findIndex((skill) => skill.id === skillId);
+  if (index < 0) {
+    throw new Error("skill not found");
+  }
+  const entry = registry.skills[index];
+  if (entry.source?.type !== "github" || !entry.source?.url) {
+    throw new Error("skill source is not configured for sync");
+  }
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "mindvault-skill-sync-"));
+  await runInstaller(entry.source.url, tempRoot);
+  const parsed = parseSkillGithubUrl(entry.source.url);
+  const nextSkillDir = path.join(tempRoot, path.basename(parsed.skillPath));
+  const targetSkillDir = path.join(rootDir, entry.path);
+  if (!existsSync(nextSkillDir)) {
+    throw new Error("synced skill folder not found");
+  }
+  await rm(targetSkillDir, { recursive: true, force: true });
+  await mkdir(path.dirname(targetSkillDir), { recursive: true });
+  await cp(nextSkillDir, targetSkillDir, { recursive: true });
+  registry.skills[index] = {
+    ...entry,
+    status: "installed",
+    last_checked_at: new Date().toISOString(),
+    last_updated_at: new Date().toISOString(),
+    last_error: "",
+  };
+  await writeSkillsRegistry(registry);
+  return {
+    message: "技能已同步到最新版本。",
+    skill: await enrichSkillEntry(registry.skills[index]),
+  };
+}
+
+async function maybeAutoUpdateSkills() {
+  const registry = await readSkillsRegistry();
+  for (const entry of registry.skills || []) {
+    if (!entry.auto_update) continue;
+    const lastChecked = Date.parse(entry.last_checked_at || "");
+    const due = Number.isNaN(lastChecked) || Date.now() - lastChecked > 1000 * 60 * 60 * 12;
+    if (!due) continue;
+    try {
+      await syncSkillById(entry.id);
+    } catch (error) {
+      const latest = await readSkillsRegistry();
+      const index = (latest.skills || []).findIndex((skill) => skill.id === entry.id);
+      if (index >= 0) {
+        latest.skills[index] = {
+          ...latest.skills[index],
+          last_checked_at: new Date().toISOString(),
+          last_error: error.message,
+        };
+        await writeSkillsRegistry(latest);
+      }
+    }
+  }
 }
 
 async function readTasks(taskDir) {
@@ -596,37 +882,6 @@ function applyDatabaseVisibility(payload, databasePlan = null) {
     };
   });
   return { ...source, databases };
-}
-
-function injectSourceCardsTable(multiDb, rawSources) {
-  const databases = [...(multiDb?.databases || [])];
-  if (databases.some((database) => database.name === "source_cards")) {
-    return { ...multiDb, databases };
-  }
-
-  const rows = (Array.isArray(rawSources) ? rawSources : [])
-    .slice()
-    .reverse()
-    .map((source) => ({
-      id: source.source_id || "",
-      title: source.metadata?.filename || source.source_id || "未命名资料",
-      summary: buildSourceSummary(source.content || ""),
-      note: source.context_hints?.note || "",
-      source_type: source.source_type || "doc",
-      ingested_at: source.ingested_at || "",
-      source_ref: source.source_id || "",
-    }));
-
-  databases.unshift({
-    name: "source_cards",
-    title: "资料卡片",
-    description: "每次输入都会先进入这里，确保资料至少可见。",
-    visibility: "business",
-    columns: ["title", "summary", "note", "source_type", "ingested_at", "id", "source_ref"],
-    rows,
-  });
-
-  return { ...multiDb, databases };
 }
 
 function buildSourceSummary(content) {
