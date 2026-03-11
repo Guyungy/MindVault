@@ -6,6 +6,12 @@
 </p>
 
 <p align="center">
+  <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/License-MIT-green.svg"/></a>
+  <img alt="python" src="https://img.shields.io/badge/Python-3.x-blue.svg"/>
+  <img alt="node" src="https://img.shields.io/badge/Node-18%2B-339933.svg"/>
+</p>
+
+<p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="#core-capabilities">Core Capabilities</a> ·
   <a href="#how-it-works">How It Works</a> ·
