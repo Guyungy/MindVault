@@ -368,6 +368,26 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(plan["databases"][0]["name"], "products")
         self.assertEqual(plan["databases"][0]["row_source"], "entities")
 
+    def test_detect_source_type_promotes_chat_like_doc_content_to_chat(self):
+        runtime = VaultRuntime(self.workspace)
+        source = {
+            "source_id": "s1",
+            "source_type": "doc",
+            "content": "\n".join(
+                [
+                    "Alice: 你好",
+                    "Bob: 在吗",
+                    "Alice: 现在网络很卡",
+                    "Bob: 你查一下服务",
+                    "Carol: 好的",
+                ]
+            ),
+            "metadata": {},
+            "context_hints": {},
+        }
+
+        self.assertEqual(runtime._detect_source_type(source), "chat")
+
     def test_finalize_multi_db_appends_fields_and_infers_relations(self):
         runtime = VaultRuntime(self.workspace)
         database_plan = {

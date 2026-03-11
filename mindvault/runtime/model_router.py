@@ -35,6 +35,7 @@ class ModelRouter:
                 max_retries=int(provider.get("max_retries", 2)),
                 retry_backoff_seconds=float(provider.get("retry_backoff_seconds", 1.0)),
                 response_format_json=bool(provider.get("response_format_json", False)),
+                max_output_tokens=int(provider.get("max_output_tokens", 0) or 0),
             )
         )
 

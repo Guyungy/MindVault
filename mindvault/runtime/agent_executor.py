@@ -63,9 +63,15 @@ class AgentExecutor:
 
         retry_policy = agent_def.get("retry_policy", {}) or {}
         max_retries = int(retry_policy.get("max_retries", client.config.max_retries))
+        max_output_tokens = int(agent_def.get("max_output_tokens", 0) or 0)
 
         role_prompt = agent_def.get("role", "You are a helpful assistant.")
-        result = client.chat(user_prompt, system_prompt=role_prompt, max_retries=max_retries)
+        result = client.chat(
+            user_prompt,
+            system_prompt=role_prompt,
+            max_retries=max_retries,
+            max_output_tokens=max_output_tokens or None,
+        )
 
         content = result.get("content", "")
         parsed = self._try_parse_json(content)

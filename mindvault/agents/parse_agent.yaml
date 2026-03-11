@@ -27,3 +27,4 @@ retry_policy:
 
 chunk_strategy: per_chunk
 max_input_tokens: 4096
+max_output_tokens: 2400

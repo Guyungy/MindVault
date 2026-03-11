@@ -20,6 +20,7 @@ class LLMProviderConfig:
     max_retries: int = 2
     retry_backoff_seconds: float = 1.0
     response_format_json: bool = False
+    max_output_tokens: int = 0
 
 
 class LLMClient:
@@ -35,10 +36,12 @@ class LLMClient:
         temperature: float = 0.2,
         max_retries: Optional[int] = None,
         timeout_seconds: Optional[int] = None,
+        max_output_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         api_key = self.config.api_key or os.getenv(self.config.api_key_env, "")
         protocol = self._protocol_for_model()
-        url, data = self._build_request(protocol, prompt, system_prompt, temperature)
+        output_limit = self.config.max_output_tokens if max_output_tokens is None else max_output_tokens
+        url, data = self._build_request(protocol, prompt, system_prompt, temperature, output_limit)
 
         retries = self.config.max_retries if max_retries is None else max_retries
         timeout = self.config.timeout_seconds if timeout_seconds is None else timeout_seconds
@@ -80,7 +83,14 @@ class LLMClient:
             return "responses"
         return "chat_completions"
 
-    def _build_request(self, protocol: str, prompt: str, system_prompt: str, temperature: float) -> tuple[str, Dict[str, Any]]:
+    def _build_request(
+        self,
+        protocol: str,
+        prompt: str,
+        system_prompt: str,
+        temperature: float,
+        max_output_tokens: int = 0,
+    ) -> tuple[str, Dict[str, Any]]:
         base = self.config.base_url.rstrip("/")
         if protocol == "responses":
             input_items = []
@@ -103,6 +113,8 @@ class LLMClient:
                 "temperature": temperature,
                 "text": {"format": {"type": "json_object"}},
             }
+            if max_output_tokens and max_output_tokens > 0:
+                data["max_output_tokens"] = max_output_tokens
             url = base if base.endswith("/responses") else f"{base}/responses"
             return url, data
 
@@ -117,6 +129,8 @@ class LLMClient:
         }
         if self.config.response_format_json or "gpt" in self.config.model.lower():
             data["response_format"] = {"type": "json_object"}
+        if max_output_tokens and max_output_tokens > 0:
+            data["max_tokens"] = max_output_tokens
         url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
         return url, data
 

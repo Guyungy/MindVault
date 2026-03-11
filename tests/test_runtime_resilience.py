@@ -18,9 +18,11 @@ class _FakeClient:
     def __init__(self):
         self.config = _FakeClientConfig(max_retries=1)
         self.captured_max_retries = None
+        self.captured_max_output_tokens = None
 
-    def chat(self, prompt, system_prompt="", max_retries=None, **kwargs):
+    def chat(self, prompt, system_prompt="", max_retries=None, max_output_tokens=None, **kwargs):
         self.captured_max_retries = max_retries
+        self.captured_max_output_tokens = max_output_tokens
         return {"content": '{"claims": [], "entity_candidates": []}'}
 
 
@@ -28,7 +30,7 @@ class _FakeErrorClient:
     def __init__(self):
         self.config = _FakeClientConfig(max_retries=1)
 
-    def chat(self, prompt, system_prompt="", max_retries=None, **kwargs):
+    def chat(self, prompt, system_prompt="", max_retries=None, max_output_tokens=None, **kwargs):
         return {"content": "[llm-fallback] network error", "error": "network error"}
 
 
@@ -79,6 +81,31 @@ class RuntimeResilienceTests(unittest.TestCase):
 
         self.assertEqual(fake_client.captured_max_retries, 4)
         self.assertIn("claims", result)
+
+    def test_agent_max_output_tokens_is_forwarded_to_client(self):
+        fake_client = _FakeClient()
+        executor = AgentExecutor(_FakeRouter(fake_client), TraceLogger())
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            prompt_file = td_path / "prompt.md"
+            prompt_file.write_text("{{chunk_text}}", encoding="utf-8")
+            agent_file = td_path / "agent.yaml"
+            agent_file.write_text(
+                "\n".join(
+                    [
+                        "name: parse_agent",
+                        "model_route: parse",
+                        f"prompt_template: {prompt_file}",
+                        "max_output_tokens: 1234",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            executor.execute(agent_file, {"chunk_text": "hello"})
+
+        self.assertEqual(fake_client.captured_max_output_tokens, 1234)
 
     def test_model_router_reads_retry_timeout_config(self):
         with tempfile.TemporaryDirectory() as td:
@@ -173,6 +200,21 @@ class RuntimeResilienceTests(unittest.TestCase):
         url, payload = client._build_request("chat_completions", "hello", "system", 0.2)
         self.assertEqual(url, "https://example.com/v1/chat/completions")
         self.assertEqual(payload["response_format"], {"type": "json_object"})
+
+    def test_llm_client_sets_max_tokens_when_configured(self):
+        client = LLMClient(
+            LLMProviderConfig(
+                name="p1",
+                base_url="https://example.com/v1",
+                api_key_env="OPENAI_API_KEY",
+                model="deepseek-ai/DeepSeek-V3.1-Terminus",
+                response_format_json=True,
+                max_output_tokens=2222,
+            )
+        )
+        url, payload = client._build_request("chat_completions", "hello", "system", 0.2, 2222)
+        self.assertEqual(url, "https://example.com/v1/chat/completions")
+        self.assertEqual(payload["max_tokens"], 2222)
 
     def test_agent_executor_injects_enabled_skill_context(self):
         fake_client = _FakeClient()

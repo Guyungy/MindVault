@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -331,6 +332,7 @@ class VaultRuntime:
             return st
         hints = source.get("context_hints", {}) or {}
         metadata = source.get("metadata", {}) or {}
+        content = str(source.get("content", "") or "")
         hint_text = " ".join(
             [
                 str(hints.get("source_type", "")),
@@ -341,7 +343,28 @@ class VaultRuntime:
         ).lower()
         if any(token in hint_text for token in ["chat", "conversation", "message", "messages", "聊天", "对话"]):
             return "chat"
+        if self._looks_like_chat_content(content):
+            return "chat"
         return "doc"
+
+    @staticmethod
+    def _looks_like_chat_content(content: str) -> bool:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return False
+        chat_like = 0
+        for line in lines[:80]:
+            if len(line) > 240:
+                continue
+            if re.match(r"^\[.+?\]\s+\S+", line):
+                chat_like += 1
+                continue
+            if re.match(r"^[^:：\n]{1,30}[:：]\s*.+", line):
+                chat_like += 1
+        return chat_like >= 4
 
     def _save_extracted(self, claims, entities, relations, events) -> Path:
         existing = sorted(self.ctx.extracted_dir.glob("extracted_v*.json"))
