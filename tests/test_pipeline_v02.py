@@ -263,6 +263,12 @@ class MindVaultV02Tests(unittest.TestCase):
     def test_report_timeout_does_not_block_multi_db_outputs(self):
         runtime = VaultRuntime(self.workspace)
         runtime.executor.execute = mock.Mock(return_value={})
+        runtime._load_runtime_settings = mock.Mock(
+            return_value={
+                "execution": {"profile": "full", "engine_mode": "json_engine"},
+                "artifacts": {"report": True},
+            }
+        )
 
         with mock.patch.object(runtime, "_generate_report", side_effect=TimeoutError("The read operation timed out")):
             result = runtime.ingest([
@@ -271,7 +277,7 @@ class MindVaultV02Tests(unittest.TestCase):
                     "source_type": "doc",
                     "content": "广州文化中心在天河区提供周末亲子阅读活动，可线上预约报名。",
                 }
-            ])
+            ], profile="full")
 
         multi_db_path = Path(result["multi_db"]["data"])
         latest_task_path = sorted((self.workspace_path / "tasks").glob("task_*/task.json"))[-1]

@@ -35,7 +35,7 @@ function parseHashRoute() {
   const raw = window.location.hash.replace(/^#/, "");
   const segments = raw.split("/").filter(Boolean);
   if (!segments.length) {
-    return { workspaceId: "", view: "overview", tableName: "", taskId: "", agentGroupId: "", agentName: "" };
+    return { workspaceId: "", view: "overview", tableName: "", taskId: "", agentGroupId: "" };
   }
   if (segments[0] === "workspace") {
     const rawView = segments[2] || "overview";
@@ -46,14 +46,13 @@ function parseHashRoute() {
       tableName: view === "tables" ? decodeURIComponent(segments[3] || "") : "",
       taskId: view === "tasks" ? decodeURIComponent(segments[3] || "") : "",
       agentGroupId: view === "agents" ? decodeURIComponent(segments[3] || "") : "",
-      agentName: view === "agents" ? decodeURIComponent(segments[4] || "") : "",
     };
   }
-  return { workspaceId: "", view: "overview", tableName: "", taskId: "", agentGroupId: "", agentName: "" };
+  return { workspaceId: "", view: "overview", tableName: "", taskId: "", agentGroupId: "" };
 }
 
 function writeHashRoute(workspaceId, view, options = {}) {
-  const { tableName = "", taskId = "", agentGroupId = "", agentName = "" } = options;
+  const { tableName = "", taskId = "", agentGroupId = "" } = options;
   let nextHash = "#/";
   if (workspaceId) {
     nextHash = `#/workspace/${encodeURIComponent(workspaceId)}/${view || "overview"}`;
@@ -65,9 +64,6 @@ function writeHashRoute(workspaceId, view, options = {}) {
     }
     if (view === "agents" && agentGroupId) {
       nextHash += `/${encodeURIComponent(agentGroupId)}`;
-      if (agentName) {
-        nextHash += `/${encodeURIComponent(agentName)}`;
-      }
     }
   }
   if (window.location.hash !== nextHash) {
@@ -78,30 +74,26 @@ function writeHashRoute(workspaceId, view, options = {}) {
 const AGENT_GROUPS = [
   {
     id: "modeling",
-    label: "建库组",
+    label: "建库智能体",
     description: "决定知识结构、数据表规划和最终多表输出。",
-    primaryAgent: "ontology_agent",
     agents: ["ontology_agent", "database_builder_agent"],
   },
   {
     id: "parsing",
-    label: "解析组",
+    label: "解析智能体",
     description: "负责抽取、关系识别、去重与 schema 初步组织。",
-    primaryAgent: "parse_agent",
     agents: ["parse_agent", "relation_agent", "dedup_agent", "schema_designer_agent", "placeholder_agent"],
   },
   {
     id: "governance",
-    label: "治理组",
+    label: "治理智能体",
     description: "负责 claim 解析后的冲突审计和可信治理。",
-    primaryAgent: "claim_resolver_agent",
     agents: ["claim_resolver_agent", "conflict_auditor_agent"],
   },
   {
     id: "publishing",
-    label: "输出组",
+    label: "输出智能体",
     description: "负责洞察、报告和 wiki 输出。",
-    primaryAgent: "report_agent",
     agents: ["insight_agent", "report_agent", "wiki_builder_agent"],
   },
 ];
@@ -167,23 +159,26 @@ export default function App() {
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [workspaceCreateStatus, setWorkspaceCreateStatus] = useState(null);
   const [workspaceDeleteStatus, setWorkspaceDeleteStatus] = useState(null);
+  const [taskDeleteStatus, setTaskDeleteStatus] = useState(null);
   const [payload, setPayload] = useState(null);
   const [modelConfig, setModelConfig] = useState(null);
+  const [runtimeSettings, setRuntimeSettings] = useState(null);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [modelSaveStatus, setModelSaveStatus] = useState(null);
+  const [runtimeSaveStatus, setRuntimeSaveStatus] = useState(null);
+  const [selectedExecutionProfile, setSelectedExecutionProfile] = useState("fast");
+  const [reportArtifactEnabled, setReportArtifactEnabled] = useState(false);
   const [error, setError] = useState("");
   const [activeView, setActiveView] = useState(initialRoute.view || "overview");
   const [activeTable, setActiveTable] = useState(initialRoute.tableName || "");
   const [selectedTaskId, setSelectedTaskId] = useState(initialRoute.taskId || "");
-  const [agentList, setAgentList] = useState([]);
+  const [agentGroupsList, setAgentGroupsList] = useState([]);
   const [skills, setSkills] = useState([]);
   const [selectedSkillId, setSelectedSkillId] = useState("");
   const [skillStatus, setSkillStatus] = useState(null);
   const [selectedAgentGroupId, setSelectedAgentGroupId] = useState("modeling");
-  const [selectedAgentName, setSelectedAgentName] = useState("");
-  const [agentSpec, setAgentSpec] = useState(null);
-  const [agentConfigInput, setAgentConfigInput] = useState("");
-  const [agentPromptInput, setAgentPromptInput] = useState("");
+  const [agentGroupSpec, setAgentGroupSpec] = useState(null);
+  const [agentSoulInput, setAgentSoulInput] = useState("");
   const [agentEnabledSkills, setAgentEnabledSkills] = useState([]);
   const [agentSaveStatus, setAgentSaveStatus] = useState(null);
   const [showSystemTables, setShowSystemTables] = useState(false);
@@ -216,22 +211,15 @@ export default function App() {
     return rows.filter((row) => JSON.stringify(row).toLowerCase().includes(normalized));
   }, [activeTableData, query]);
   const selectedTask = tasks.find((task) => task.task_id === selectedTaskId) || tasks[0] || null;
-  const agentGroups = useMemo(
-    () =>
-      AGENT_GROUPS.map((group) => ({
-        ...group,
-        items: group.agents.map((agentName) => agentList.find((agent) => agent.name === agentName)).filter(Boolean),
-      })).filter((group) => group.items.length),
-    [agentList],
-  );
-  const selectedAgentGroup =
-    agentGroups.find((group) => group.id === selectedAgentGroupId) || agentGroups[0] || null;
+  const agentGroups = useMemo(() => (agentGroupsList.length ? agentGroupsList : AGENT_GROUPS), [agentGroupsList]);
+  const selectedAgentGroup = agentGroups.find((group) => group.id === selectedAgentGroupId) || agentGroups[0] || null;
 
   useEffect(() => {
     loadWorkspaces();
-    loadAgents();
+    loadAgentGroups();
     loadSkills();
     loadModels();
+    loadRuntimeSettings();
   }, []);
 
   useEffect(() => {
@@ -252,24 +240,34 @@ export default function App() {
       if (route.view === "agents" && route.agentGroupId && route.agentGroupId !== selectedAgentGroupId) {
         setSelectedAgentGroupId(route.agentGroupId);
       }
-      if (route.view === "agents" && route.agentName !== selectedAgentName) {
-        setSelectedAgentName(route.agentName);
-      }
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, [workspaceId, activeView, activeTable, selectedTaskId, selectedAgentGroupId, selectedAgentName]);
+  }, [workspaceId, activeView, activeTable, selectedTaskId, selectedAgentGroupId]);
 
   useEffect(() => {
     if (!workspaceId) return;
     setPayload(null);
     setQuery("");
     setShowSystemTables(false);
+    setTaskDeleteStatus(null);
     setActiveTable((current) => (workspaceId !== initialRoute.workspaceId ? "" : current));
     setSelectedTaskId((current) => (workspaceId !== initialRoute.workspaceId ? "" : current));
     setIngestStatus(null);
     loadWorkspace(workspaceId);
   }, [workspaceId]);
+
+  useEffect(() => {
+    if (activeView !== "tasks") {
+      setTaskDeleteStatus(null);
+    }
+  }, [activeView]);
+
+  useEffect(() => {
+    if (!taskDeleteStatus) return undefined;
+    const timer = window.setTimeout(() => setTaskDeleteStatus(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [taskDeleteStatus]);
 
   useEffect(() => {
     if (!workspaceId && workspaces[0]?.id) {
@@ -279,9 +277,8 @@ export default function App() {
       tableName: activeView === "tables" ? activeTable : "",
       taskId: activeView === "tasks" ? selectedTaskId : "",
       agentGroupId: activeView === "agents" ? selectedAgentGroupId : "",
-      agentName: activeView === "agents" ? selectedAgentName : "",
     });
-  }, [workspaceId, activeView, activeTable, selectedTaskId, selectedAgentGroupId, selectedAgentName, workspaces]);
+  }, [workspaceId, activeView, activeTable, selectedTaskId, selectedAgentGroupId, workspaces]);
 
   useEffect(() => {
     if (!visibleTables.length) return;
@@ -314,21 +311,9 @@ export default function App() {
   }, [isPollingTask, latestTask]);
 
   useEffect(() => {
-    if (!selectedAgentName) return;
-    loadAgentSpec(selectedAgentName);
-  }, [selectedAgentName]);
-
-  useEffect(() => {
     if (!selectedAgentGroup) return;
-    const preferredName =
-      (selectedAgentGroup.primaryAgent &&
-      selectedAgentGroup.items.some((agent) => agent.name === selectedAgentGroup.primaryAgent)
-        ? selectedAgentGroup.primaryAgent
-        : selectedAgentGroup.items[0]?.name) || "";
-    if (!selectedAgentGroup.items.some((agent) => agent.name === selectedAgentName) || selectedAgentName !== preferredName) {
-      setSelectedAgentName(preferredName);
-    }
-  }, [selectedAgentGroup, selectedAgentName]);
+    loadAgentGroupSpec(selectedAgentGroup.id);
+  }, [selectedAgentGroup]);
 
   async function loadWorkspaces() {
     try {
@@ -352,23 +337,14 @@ export default function App() {
     }
   }
 
-  async function loadAgents() {
+  async function loadAgentGroups() {
     try {
-      const result = await fetchJson("/api/agents");
-      const items = result.agents || [];
-      setAgentList(items);
+      const result = await fetchJson("/api/agent-groups");
+      const items = result.groups || [];
+      setAgentGroupsList(items);
       const route = parseHashRoute();
-      const initialGroup =
-        AGENT_GROUPS.find((group) => group.id === route.agentGroupId && group.agents.some((agent) => items.some((item) => item.name === agent))) ||
-        AGENT_GROUPS.find((group) => group.agents.some((agent) => items.some((item) => item.name === agent)));
-      const initialName =
-        (route.agentName && items.some((item) => item.name === route.agentName) ? route.agentName : "") ||
-        (initialGroup?.primaryAgent && items.some((item) => item.name === initialGroup.primaryAgent) ? initialGroup.primaryAgent : "") ||
-        initialGroup?.agents.find((agent) => items.some((item) => item.name === agent)) ||
-        items[0]?.name ||
-        "";
+      const initialGroup = items.find((group) => group.id === route.agentGroupId) || items[0] || null;
       setSelectedAgentGroupId(initialGroup?.id || "modeling");
-      setSelectedAgentName(initialName);
     } catch (err) {
       setError(err.message);
     }
@@ -379,6 +355,17 @@ export default function App() {
       const result = await fetchJson("/api/models");
       setModelConfig(result);
       setSelectedProviderId(result.currentProviderId || "");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function loadRuntimeSettings() {
+    try {
+      const result = await fetchJson("/api/runtime-settings");
+      setRuntimeSettings(result);
+      setSelectedExecutionProfile(result.execution?.profile || "fast");
+      setReportArtifactEnabled(Boolean(result.artifacts?.report));
     } catch (err) {
       setError(err.message);
     }
@@ -404,6 +391,36 @@ export default function App() {
       setModelSaveStatus({ ok: true, message: result.message || "默认模型已切换。" });
     } catch (err) {
       setModelSaveStatus({ ok: false, message: err.message });
+    }
+  }
+
+  async function saveRuntimeSettings() {
+    try {
+      setRuntimeSaveStatus({ ok: true, message: "正在保存运行设置..." });
+      const response = await fetch("/api/runtime-settings", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          execution: {
+            profile: selectedExecutionProfile,
+          },
+          artifacts: {
+            report: reportArtifactEnabled,
+          },
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result?.error || `Request failed: ${response.status}`);
+      }
+      setRuntimeSettings(result);
+      setSelectedExecutionProfile(result.execution?.profile || "fast");
+      setReportArtifactEnabled(Boolean(result.artifacts?.report));
+      setRuntimeSaveStatus({ ok: true, message: result.message || "运行设置已保存。" });
+    } catch (err) {
+      setRuntimeSaveStatus({ ok: false, message: err.message });
     }
   }
 
@@ -448,13 +465,12 @@ export default function App() {
     }
   }
 
-  async function loadAgentSpec(agentName) {
+  async function loadAgentGroupSpec(groupId) {
     try {
       setAgentSaveStatus(null);
-      const result = await fetchJson(`/api/agents/${encodeURIComponent(agentName)}`);
-      setAgentSpec(result);
-      setAgentConfigInput(result.configContent || "");
-      setAgentPromptInput(result.promptContent || "");
+      const result = await fetchJson(`/api/agent-groups/${encodeURIComponent(groupId)}`);
+      setAgentGroupSpec(result);
+      setAgentSoulInput(result.soulContent || "");
       setAgentEnabledSkills(result.enabledSkills || []);
     } catch (err) {
       setError(err.message);
@@ -462,17 +478,16 @@ export default function App() {
   }
 
   async function saveAgentSpec() {
-    if (!selectedAgentName) return;
+    if (!selectedAgentGroupId) return;
     try {
       setAgentSaveStatus({ ok: true, message: "正在保存..." });
-      const response = await fetch(`/api/agents/${encodeURIComponent(selectedAgentName)}`, {
+      const response = await fetch(`/api/agent-groups/${encodeURIComponent(selectedAgentGroupId)}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          configContent: agentConfigInput,
-          promptContent: agentPromptInput,
+          soulContent: agentSoulInput,
           enabledSkills: agentEnabledSkills,
         }),
       });
@@ -480,12 +495,11 @@ export default function App() {
       if (!response.ok) {
         throw new Error(result?.error || `Request failed: ${response.status}`);
       }
-      setAgentSpec(result.agent || null);
+      setAgentGroupSpec(result.group || null);
       setAgentSaveStatus({ ok: true, message: result.message || "已保存。" });
-      setAgentConfigInput(result.agent?.configContent || "");
-      setAgentPromptInput(result.agent?.promptContent || "");
-      setAgentEnabledSkills(result.agent?.enabledSkills || []);
-      loadAgents();
+      setAgentSoulInput(result.group?.soulContent || "");
+      setAgentEnabledSkills(result.group?.enabledSkills || []);
+      loadAgentGroups();
     } catch (err) {
       setAgentSaveStatus({ ok: false, message: err.message });
     }
@@ -598,6 +612,27 @@ export default function App() {
     } catch (err) {
       setIsPollingTask(false);
       setIngestStatus({ ok: false, message: err.message });
+    }
+  }
+
+  async function deleteTask(taskId) {
+    if (!workspaceId || !taskId) return;
+    const confirmed = window.confirm(`确定删除任务「${taskId}」吗？该任务详情和步骤日志会一并删除。`);
+    if (!confirmed) return;
+    try {
+      setTaskDeleteStatus({ ok: true, message: "正在删除任务...", taskId });
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(taskId)}`, {
+        method: "DELETE",
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result?.error || `Request failed: ${response.status}`);
+      }
+      setTaskDeleteStatus({ ok: true, message: result.message || "任务已删除。", taskId });
+      await loadWorkspace(workspaceId);
+      setSelectedTaskId((current) => (current === taskId ? "" : current));
+    } catch (err) {
+      setTaskDeleteStatus({ ok: false, message: err.message, taskId });
     }
   }
 
@@ -782,6 +817,8 @@ export default function App() {
                   selectedTask={selectedTask}
                   selectedTaskId={selectedTaskId}
                   onSelectTask={setSelectedTaskId}
+                  onDeleteTask={deleteTask}
+                  deleteStatus={taskDeleteStatus}
                 />
               ) : null}
 
@@ -790,17 +827,13 @@ export default function App() {
                   agentGroups={agentGroups}
                   skills={skills}
                   selectedAgentGroupId={selectedAgentGroupId}
-                  selectedAgentName={selectedAgentName}
                   selectedAgentGroup={selectedAgentGroup}
-                  agentSpec={agentSpec}
-                  configInput={agentConfigInput}
-                  promptInput={agentPromptInput}
+                  agentGroupSpec={agentGroupSpec}
+                  soulInput={agentSoulInput}
                   enabledSkills={agentEnabledSkills}
                   saveStatus={agentSaveStatus}
                   onSelectGroup={setSelectedAgentGroupId}
-                  onSelectAgent={setSelectedAgentName}
-                  onConfigChange={setAgentConfigInput}
-                  onPromptChange={setAgentPromptInput}
+                  onSoulChange={setAgentSoulInput}
                   onToggleSkill={(skillId) =>
                     setAgentEnabledSkills((current) =>
                       current.includes(skillId) ? current.filter((item) => item !== skillId) : [...current, skillId],
@@ -825,10 +858,17 @@ export default function App() {
                 <SettingsView
                   workspaceId={payload?.workspace || workspaceId}
                   modelConfig={modelConfig}
+                  runtimeSettings={runtimeSettings}
                   selectedProviderId={selectedProviderId}
+                  selectedExecutionProfile={selectedExecutionProfile}
+                  reportArtifactEnabled={reportArtifactEnabled}
                   onProviderChange={setSelectedProviderId}
+                  onExecutionProfileChange={setSelectedExecutionProfile}
+                  onReportArtifactToggle={setReportArtifactEnabled}
                   onSaveModel={saveModelSelection}
+                  onSaveRuntimeSettings={saveRuntimeSettings}
                   saveStatus={modelSaveStatus}
+                  runtimeSaveStatus={runtimeSaveStatus}
                 />
               ) : null}
             </div>
@@ -1906,11 +1946,12 @@ function IngestPanel({
   );
 }
 
-function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
+function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDeleteTask, deleteStatus }) {
   const timeline = selectedTask?.stepTimeline || condenseStepEntries(selectedTask?.recentSteps || []);
   const coreTimeline = summarizeCoreTimeline(timeline, selectedTask);
   const eventLog = selectedTask?.stepEntries || selectedTask?.recentSteps || [];
   const liveStep = findLiveStep(selectedTask);
+  const progress = selectedTask ? summarizeTaskProgress(selectedTask, coreTimeline) : null;
 
   return (
     <div className="grid gap-4 xl:grid-cols-[240px_1fr]">
@@ -1933,7 +1974,12 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
                   onClick={() => onSelectTask(task.task_id)}
                 >
                   <div className="flex items-center justify-between gap-3">
-                    <div className="truncate font-medium">{task.task_id}</div>
+                    <div className="flex min-w-0 items-center gap-2">
+                      {getEffectiveTaskStatus(task) === "running" ? (
+                        <span className="mv-pulse-dot h-2 w-2 rounded-full bg-[var(--primary)]" />
+                      ) : null}
+                      <div className="truncate font-medium">{task.task_id}</div>
+                    </div>
                     <StatusBadge task={task} />
                   </div>
                   <div className="mt-1 text-xs text-[var(--muted-foreground)]">
@@ -1954,6 +2000,11 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
           <CardDescription>单页查看任务状态、影响、核心流程和产物。</CardDescription>
         </CardHeader>
         <CardContent>
+          {deleteStatus ? (
+            <div className={`mb-4 text-sm ${deleteStatus.ok ? "text-[var(--primary)]" : "text-[var(--destructive)]"}`}>
+              {deleteStatus.message}
+            </div>
+          ) : null}
           {selectedTask ? (
             <div className="space-y-6">
               <div className="border-b border-[var(--border)]/70 pb-4">
@@ -1963,9 +2014,37 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
                     <div className="mt-2 text-xl font-semibold text-[var(--foreground)]">{selectedTask.task_id}</div>
                     <div className="mt-2 text-sm text-[var(--muted-foreground)]">{selectedTask.resume_hint || "暂无任务说明"}</div>
                   </div>
-                  <StatusBadge task={selectedTask} />
+                  <div className="flex items-center gap-2">
+                    <StatusBadge task={selectedTask} />
+                    <Button size="sm" variant="outline" onClick={() => onDeleteTask?.(selectedTask.task_id)}>
+                      删除任务
+                    </Button>
+                  </div>
                 </div>
               </div>
+
+              {progress ? (
+                <div className="border-b border-[var(--border)]/70 pb-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">流程进度</div>
+                      <div className={`mt-2 text-sm font-medium ${selectedTask.status === "running" ? "mv-shimmer-text" : "text-[var(--foreground)]"}`}>
+                        {progress.label}
+                      </div>
+                    </div>
+                    <div className="text-sm font-medium text-[var(--foreground)]">{progress.percent}%</div>
+                  </div>
+                  <div className="mt-3 h-2 rounded-full bg-[var(--secondary)]">
+                    <div
+                      className={`h-2 rounded-full bg-[var(--primary)] transition-all duration-500 ${selectedTask.status === "running" ? "mv-flow-bar" : ""}`}
+                      style={{ width: `${Math.max(progress.percent, selectedTask.status === "running" ? 18 : 0)}%` }}
+                    />
+                  </div>
+                  <div className="mt-2 text-xs text-[var(--muted-foreground)]">
+                    已完成 {progress.completed} / {progress.total} 个核心阶段
+                  </div>
+                </div>
+              ) : null}
 
               {hasTaskFailure(selectedTask) ? (
                 <div className="border border-[var(--destructive)]/25 bg-[color-mix(in_oklab,var(--destructive)_8%,white)] px-4 py-4">
@@ -2052,9 +2131,19 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
                 <div className="space-y-3">
                   {coreTimeline.length ? (
                     coreTimeline.map((step, index) => (
-                      <div key={`${step.timestamp || index}-${step.action || step.status}`} className="border-b border-[var(--border)]/60 px-0 py-4">
+                      <div
+                        key={`${step.timestamp || index}-${step.action || step.status}`}
+                        className={`border-b border-[var(--border)]/60 px-0 py-4 ${
+                          step.status === "running" ? "bg-[color-mix(in_oklab,var(--primary)_4%,transparent)]" : ""
+                        }`}
+                      >
                         <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div className="font-medium text-[var(--foreground)]">{step.label || formatStepLabel(step.action || "-")}</div>
+                          <div className="flex items-center gap-2">
+                            {step.status === "running" ? (
+                              <span className="mv-pulse-dot h-2 w-2 rounded-full bg-[var(--primary)]" />
+                            ) : null}
+                            <div className="font-medium text-[var(--foreground)]">{step.label || formatStepLabel(step.action || "-")}</div>
+                          </div>
                           <Badge variant={mapStepVariant(step.status)}>{mapStepStatus(step.status)}</Badge>
                         </div>
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
@@ -2076,7 +2165,12 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
                             </>
                           ) : null}
                         </div>
-                        {step.resume_hint ? <div className="mt-2 text-sm text-[var(--muted-foreground)]">{step.resume_hint}</div> : null}
+                        {step.resume_hint ? <div className={`mt-2 text-sm text-[var(--muted-foreground)] ${step.status === "running" ? "mv-shimmer-text" : ""}`}>{step.resume_hint}</div> : null}
+                        {step.status === "running" ? (
+                          <div className="mt-3 h-1.5 rounded-full bg-[var(--secondary)]">
+                            <div className="mv-flow-bar h-1.5 w-1/3 rounded-full bg-[var(--primary)]" />
+                          </div>
+                        ) : null}
                         {step.outputs?.length ? (
                           <div className="mt-3 flex flex-wrap gap-2">
                             {step.outputs.map((item) => (
@@ -2260,10 +2354,17 @@ function SkillsView({ skills, selectedSkillId, onSelectSkill, onToggleAutoUpdate
 function SettingsView({
   workspaceId,
   modelConfig,
+  runtimeSettings,
   selectedProviderId,
+  selectedExecutionProfile,
+  reportArtifactEnabled,
   onProviderChange,
+  onExecutionProfileChange,
+  onReportArtifactToggle,
   onSaveModel,
+  onSaveRuntimeSettings,
   saveStatus,
+  runtimeSaveStatus,
 }) {
   const browserTimezone =
     typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone || "-" : "-";
@@ -2276,6 +2377,46 @@ function SettingsView({
           <CardDescription>放系统级配置，不再占用全局头部。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
+          <div className="border-b border-[var(--border)]/70 pb-4">
+            <div className="text-sm font-medium text-[var(--foreground)]">运行方式</div>
+            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              由 Node 设置决定任务编排方式；Python 只负责知识引擎和 JSON 结果。
+            </div>
+            <div className="mt-4 grid gap-4 md:grid-cols-[220px_1fr]">
+              <div>
+                <div className="mb-2 text-xs text-[var(--muted-foreground)]">任务编排模式</div>
+                <Select value={selectedExecutionProfile} onChange={(event) => onExecutionProfileChange(event.target.value)}>
+                  <option value="fast">快速模式 · 只跑核心数据表</option>
+                  <option value="full">完整模式 · 额外生成报告</option>
+                </Select>
+              </div>
+              <div>
+                <div className="mb-2 text-xs text-[var(--muted-foreground)]">附加产物</div>
+                <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+                  <input
+                    type="checkbox"
+                    checked={reportArtifactEnabled}
+                    onChange={(event) => onReportArtifactToggle(event.target.checked)}
+                  />
+                  生成报告 JSON
+                </label>
+                <div className="mt-2 text-xs text-[var(--muted-foreground)]">
+                  当前引擎模式：{runtimeSettings?.execution?.engine_mode || "json_engine"}。控制台与知识页展示由 Node 前端负责，不再由 Python 主链路生成。
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex items-center gap-3">
+              <Button onClick={onSaveRuntimeSettings}>
+                保存运行设置
+              </Button>
+              {runtimeSaveStatus ? (
+                <div className={`text-sm ${runtimeSaveStatus.ok ? "text-[var(--primary)]" : "text-[var(--destructive)]"}`}>
+                  {runtimeSaveStatus.message}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
           <div className="border-b border-[var(--border)]/70 pb-4">
             <div className="text-sm font-medium text-[var(--foreground)]">模型切换</div>
             <div className="mt-1 text-xs text-[var(--muted-foreground)]">
@@ -2347,7 +2488,7 @@ function SettingsView({
           <div className="pb-1">
             <div className="text-sm font-medium text-[var(--foreground)]">任务策略</div>
             <div className="mt-2 text-xs text-[var(--muted-foreground)]">
-              同一工作空间建议串行运行；报告、知识页等可选产物不应阻塞数据表生成。
+              建议默认使用快速模式；附加产物只在确实需要时开启，避免录入一次就等待数分钟。
             </div>
           </div>
         </CardContent>
@@ -2360,17 +2501,13 @@ function AgentsView({
   agentGroups,
   skills,
   selectedAgentGroupId,
-  selectedAgentName,
   selectedAgentGroup,
-  agentSpec,
-  configInput,
-  promptInput,
+  agentGroupSpec,
+  soulInput,
   enabledSkills,
   saveStatus,
   onSelectGroup,
-  onSelectAgent,
-  onConfigChange,
-  onPromptChange,
+  onSoulChange,
   onToggleSkill,
   onSave,
 }) {
@@ -2378,8 +2515,8 @@ function AgentsView({
     <div className="grid gap-4 xl:grid-cols-[240px_1fr]">
       <Card className="bg-transparent">
         <CardHeader>
-          <CardTitle>功能组</CardTitle>
-          <CardDescription>这里只切换策略分组，不直接暴露底层流程。</CardDescription>
+          <CardTitle>智能体</CardTitle>
+          <CardDescription>一个功能域就是一个智能体，不再逐个暴露子智能体。</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="space-y-1">
@@ -2396,13 +2533,12 @@ function AgentsView({
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="font-medium">{group.label}</div>
-                    <Badge variant="outline">{group.items.length} 个</Badge>
                   </div>
                   <div className="mt-2 text-xs text-[var(--muted-foreground)]">{group.description}</div>
                 </button>
               ))
             ) : (
-              <div className="text-sm text-[var(--muted-foreground)]">没有可编辑的智能体分组。</div>
+              <div className="text-sm text-[var(--muted-foreground)]">没有可编辑的智能体。</div>
             )}
           </div>
         </CardContent>
@@ -2410,39 +2546,28 @@ function AgentsView({
 
       <Card className="bg-transparent">
         <CardHeader>
-          <CardTitle>功能组设置</CardTitle>
-          <CardDescription>更像设置页，而不是逐个编辑器。只保留主智能体的运行配置和提示词。</CardDescription>
+          <CardTitle>智能体设置</CardTitle>
+          <CardDescription>只编辑这个智能体的 Soul 文档和共享 Skill，不再拆一堆子智能体提示词。</CardDescription>
         </CardHeader>
         <CardContent>
           {selectedAgentGroup ? (
             <div className="space-y-4">
               <div className="grid gap-3 md:grid-cols-3">
                 <div className="border-b border-[var(--border)]/60 py-3">
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">功能组</div>
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">智能体</div>
                   <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">{selectedAgentGroup.label}</div>
                 </div>
                 <div className="border-b border-[var(--border)]/60 py-3">
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">主智能体</div>
-                  <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">{formatAgentLabel(selectedAgentName)}</div>
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">Soul 文档</div>
+                  <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">{agentGroupSpec?.soulPath || "-"}</div>
                 </div>
                 <div className="border-b border-[var(--border)]/60 py-3">
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">内部步骤数</div>
-                  <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">{selectedAgentGroup.items.length} 个</div>
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">运行方式</div>
+                  <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">单智能体入口</div>
                 </div>
               </div>
 
               <div className="border-t border-[var(--border)]/70 pt-4 text-sm text-[var(--muted-foreground)]">{selectedAgentGroup.description}</div>
-
-              <div className="border-t border-[var(--border)]/70 pt-4">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">内部步骤</div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {selectedAgentGroup.items.map((agent) => (
-                    <Badge key={agent.name} variant={agent.name === selectedAgentName ? "default" : "outline"}>
-                      {formatAgentLabel(agent.name)}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
 
               <div className="border-t border-[var(--border)]/70 pt-4">
                 <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">Skill 能力</div>
@@ -2470,31 +2595,15 @@ function AgentsView({
                   )}
                 </div>
                 <div className="mt-3 text-xs text-[var(--muted-foreground)]">
-                  启用后，运行该智能体时会把 Skill 内容注入到提示词上下文里。
+                  启用后，这个智能体内部成员运行时都会共享这些 Skill。
                 </div>
               </div>
 
-              {agentSpec ? (
+              {agentGroupSpec ? (
                 <>
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="border-b border-[var(--border)]/60 py-3">
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">运行配置文件</div>
-                  <div className="mt-2 break-all text-sm text-[var(--foreground)]">{agentSpec.configPath}</div>
-                </div>
-                <div className="border-b border-[var(--border)]/60 py-3">
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">提示词文件</div>
-                  <div className="mt-2 break-all text-sm text-[var(--foreground)]">{agentSpec.promptPath || "未配置 prompt_template"}</div>
-                </div>
-              </div>
-
               <div className="space-y-2">
-                <div className="text-sm font-medium text-[var(--foreground)]">运行配置</div>
-                <Textarea className="min-h-[260px] font-mono text-xs" value={configInput} onChange={(event) => onConfigChange(event.target.value)} />
-              </div>
-
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-[var(--foreground)]">主提示词</div>
-                <Textarea className="min-h-[260px] font-mono text-xs" value={promptInput} onChange={(event) => onPromptChange(event.target.value)} />
+                <div className="text-sm font-medium text-[var(--foreground)]">Soul 文档</div>
+                <Textarea className="min-h-[320px] font-mono text-xs" value={soulInput} onChange={(event) => onSoulChange(event.target.value)} />
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
@@ -2680,7 +2789,47 @@ function mapStepStatus(status) {
 
 function formatAgentLabel(name) {
   if (!name) return "";
+  const groupLabel = mapAgentGroupLabel(name);
+  if (groupLabel) return groupLabel;
   return AGENT_LABELS[name] || name;
+}
+
+function mapAgentGroupLabel(name) {
+  const agentName = String(name || "").trim();
+  if (!agentName) return "";
+  if (["ontology_agent", "database_builder_agent"].includes(agentName)) {
+    return "建库智能体";
+  }
+  if ([
+    "parse_agent",
+    "relation_agent",
+    "dedup_agent",
+    "schema_designer_agent",
+    "placeholder_agent",
+  ].includes(agentName)) {
+    return "解析智能体";
+  }
+  if ([
+    "claim_resolver_agent",
+    "conflict_auditor_agent",
+    "schema_engine",
+    "memory_curator",
+    "knowledge_store",
+    "governance",
+    "version_store",
+  ].includes(agentName)) {
+    return "治理智能体";
+  }
+  if ([
+    "insight_agent",
+    "report_agent",
+    "wiki_builder_agent",
+    "insight_generator",
+    "dashboard_renderer",
+  ].includes(agentName)) {
+    return "输出智能体";
+  }
+  return "";
 }
 
 function formatStepLabel(name) {
@@ -2697,6 +2846,31 @@ function mapStepVariant(status) {
   if (["failed", "blocked", "stale"].includes(status)) return "danger";
   if (status === "fallback") return "warm";
   return "outline";
+}
+
+function summarizeTaskProgress(task, coreTimeline) {
+  const stages = coreTimeline || [];
+  const total = stages.length || 1;
+  const completed = stages.filter((step) => step.status === "ok").length;
+  const runningStep = stages.find((step) => step.status === "running");
+  const failedStep = stages.find((step) => step.status === "failed");
+  const activeLabel = failedStep
+    ? `${failedStep.label || formatStepLabel(failedStep.action || "-")}未完成`
+    : runningStep
+      ? `${runningStep.label || formatStepLabel(runningStep.action || "-")}正在执行`
+      : task?.status === "completed"
+        ? "全部阶段已完成"
+        : "等待下一步";
+  const percent = task?.status === "completed"
+    ? 100
+    : Math.round((completed / total) * 100);
+
+  return {
+    total,
+    completed,
+    percent,
+    label: activeLabel,
+  };
 }
 
 async function fetchJson(url) {
@@ -3038,18 +3212,29 @@ function buildSourceSummary(content, note = "") {
   return note ? `${summary} · 备注：${note}` : summary;
 }
 
+function parseTaskDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(normalized);
+  const utcLike = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+  const parsed = new Date(hasTimezone || !utcLike.test(normalized) ? normalized : `${normalized}Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function formatTaskTime(value) {
   if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  const date = parseTaskDate(value);
+  if (!date) return value;
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function formatDuration(startValue, endValue) {
-  const start = Date.parse(startValue || "");
-  const end = Date.parse(endValue || "");
-  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return "-";
-  const totalSeconds = Math.floor((end - start) / 1000);
+  const start = parseTaskDate(startValue);
+  const end = parseTaskDate(endValue);
+  if (!start || !end || end < start) return "-";
+  const totalSeconds = Math.floor((end.getTime() - start.getTime()) / 1000);
   if (totalSeconds < 60) return `${totalSeconds} 秒`;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -3057,9 +3242,9 @@ function formatDuration(startValue, endValue) {
 }
 
 function formatElapsed(startValue) {
-  const start = Date.parse(startValue || "");
-  if (Number.isNaN(start)) return "-";
-  const totalSeconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const start = parseTaskDate(startValue);
+  if (!start) return "-";
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - start.getTime()) / 1000));
   if (totalSeconds < 60) return `${totalSeconds} 秒`;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;

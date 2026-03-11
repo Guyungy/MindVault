@@ -15,7 +15,9 @@ const distDir = path.join(__dirname, "dist");
 const publicDir = existsSync(distDir) ? distDir : path.join(__dirname, "public");
 const workspacesDir = path.join(rootDir, "output", "workspaces");
 const agentsDir = path.join(rootDir, "mindvault", "agents");
+const agentGroupsConfigPath = path.join(rootDir, "config", "agent_groups.json");
 const modelConfigPath = path.join(rootDir, "config", "model_config.json");
+const runtimeConfigPath = path.join(rootDir, "config", "runtime_config.json");
 const skillsDir = path.join(rootDir, "skills");
 const skillsRegistryPath = path.join(rootDir, "config", "skills_registry.json");
 const agentSkillBindingsPath = path.join(rootDir, "config", "agent_skill_bindings.json");
@@ -53,6 +55,10 @@ const server = createServer(async (req, res) => {
     return sendJson(res, await listAgentSpecs());
   }
 
+  if (url.pathname === "/api/agent-groups" && req.method === "GET") {
+    return sendJson(res, await listAgentGroupSpecs());
+  }
+
   if (url.pathname === "/api/skills") {
     if (req.method === "GET") {
       return sendJson(res, await listSkills());
@@ -82,6 +88,15 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  if (url.pathname === "/api/runtime-settings") {
+    if (req.method === "GET") {
+      return sendJson(res, await readRuntimeConfig());
+    }
+    if (req.method === "PUT") {
+      return handleRuntimeConfigUpdate(req, res);
+    }
+  }
+
   if (url.pathname.startsWith("/api/agents/")) {
     const agentName = decodeURIComponent(url.pathname.replace("/api/agents/", "").replace(/\/$/, ""));
     if (req.method === "GET") {
@@ -92,11 +107,28 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  if (url.pathname.startsWith("/api/agent-groups/")) {
+    const groupId = decodeURIComponent(url.pathname.replace("/api/agent-groups/", "").replace(/\/$/, ""));
+    if (req.method === "GET") {
+      return sendJson(res, await readAgentGroupSpec(groupId), 200);
+    }
+    if (req.method === "PUT") {
+      return handleAgentGroupUpdate(req, res, groupId);
+    }
+  }
+
   if (url.pathname.startsWith("/api/workspaces/") && url.pathname.endsWith("/ingest") && req.method === "POST") {
     const workspaceId = decodeURIComponent(
       url.pathname.replace("/api/workspaces/", "").replace("/ingest", "").replace(/\/$/, ""),
     );
     return handleIngest(req, res, workspaceId);
+  }
+
+  if (url.pathname.startsWith("/api/workspaces/") && url.pathname.includes("/tasks/") && req.method === "DELETE") {
+    const parts = url.pathname.split("/").filter(Boolean);
+    const workspaceId = decodeURIComponent(parts[2] || "");
+    const taskId = decodeURIComponent(parts[4] || "");
+    return handleTaskDelete(res, workspaceId, taskId);
   }
 
   if (url.pathname.startsWith("/api/workspaces/")) {
@@ -214,6 +246,30 @@ async function handleWorkspaceDelete(res, workspaceId) {
   }
 }
 
+async function handleTaskDelete(res, workspaceId, taskId) {
+  try {
+    const safeWorkspaceId = sanitizeWorkspaceId(workspaceId);
+    const safeTaskId = String(taskId || "").trim().replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (!safeWorkspaceId || !safeTaskId) {
+      return sendJson(res, { error: "invalid workspace or task id" }, 400);
+    }
+    const taskRoot = path.join(workspacesDir, safeWorkspaceId, "tasks", safeTaskId);
+    const meta = await safeStat(taskRoot);
+    if (!meta?.isDirectory()) {
+      return sendJson(res, { error: "task not found" }, 404);
+    }
+    await rm(taskRoot, { recursive: true, force: true });
+    return sendJson(res, {
+      success: true,
+      workspace: safeWorkspaceId,
+      task_id: safeTaskId,
+      message: "任务已删除。",
+    });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
+}
+
 async function listAgentSpecs() {
   if (!existsSync(agentsDir)) return { agents: [] };
   const entries = await readdir(agentsDir);
@@ -231,6 +287,46 @@ async function listAgentSpecs() {
     });
   }
   return { agents };
+}
+
+async function readAgentGroupsConfig() {
+  return readJsonSafe(agentGroupsConfigPath, { groups: [] });
+}
+
+async function listAgentGroupSpecs() {
+  const config = await readAgentGroupsConfig();
+  const groups = [];
+  for (const group of config.groups || []) {
+    const spec = await readAgentGroupSpec(group.id);
+    if (!spec?.id) continue;
+    groups.push({
+      id: spec.id,
+      label: spec.label,
+      description: spec.description,
+      soulPath: spec.soulPath,
+    });
+  }
+  return { groups };
+}
+
+async function readAgentGroupSpec(groupId) {
+  const config = await readAgentGroupsConfig();
+  const group = (config.groups || []).find((item) => item.id === groupId);
+  if (!group) {
+    return { error: `agent group not found: ${groupId}` };
+  }
+  const soulPath = path.join(rootDir, group.soul_path || "");
+  const soulContent = existsSync(soulPath) ? await readFile(soulPath, "utf-8") : "";
+  const bindings = await readAgentSkillBindings();
+  const firstAgent = (group.internal_agents || [])[0];
+  return {
+    id: group.id,
+    label: group.label,
+    description: group.description,
+    soulPath: group.soul_path || "",
+    soulContent,
+    enabledSkills: firstAgent ? bindings.agents?.[firstAgent] || [] : [],
+  };
 }
 
 async function readAgentSpec(agentName) {
@@ -301,6 +397,46 @@ async function handleModelConfigUpdate(req, res) {
   }
 }
 
+async function readRuntimeConfig() {
+  const config = await readJsonSafe(runtimeConfigPath, {
+    execution: { profile: "fast", engine_mode: "json_engine" },
+    artifacts: { report: false },
+  });
+  return {
+    execution: {
+      profile: ["fast", "full"].includes(config?.execution?.profile) ? config.execution.profile : "fast",
+      engine_mode: config?.execution?.engine_mode || "json_engine",
+    },
+    artifacts: {
+      report: Boolean(config?.artifacts?.report),
+    },
+  };
+}
+
+async function handleRuntimeConfigUpdate(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const current = await readRuntimeConfig();
+    const next = {
+      execution: {
+        profile: ["fast", "full"].includes(body?.execution?.profile) ? body.execution.profile : current.execution.profile,
+        engine_mode: "json_engine",
+      },
+      artifacts: {
+        report: typeof body?.artifacts?.report === "boolean" ? body.artifacts.report : current.artifacts.report,
+      },
+    };
+    await writeFile(runtimeConfigPath, JSON.stringify(next, null, 2), "utf-8");
+    return sendJson(res, {
+      success: true,
+      message: "运行设置已保存。",
+      ...(await readRuntimeConfig()),
+    });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
+}
+
 async function handleAgentUpdate(req, res, agentName) {
   try {
     const body = await readJsonBody(req);
@@ -330,6 +466,40 @@ async function handleAgentUpdate(req, res, agentName) {
       success: true,
       agent: await readAgentSpec(agentName),
       message: "智能体提示词已保存。",
+    });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
+}
+
+async function handleAgentGroupUpdate(req, res, groupId) {
+  try {
+    const body = await readJsonBody(req);
+    const config = await readAgentGroupsConfig();
+    const group = (config.groups || []).find((item) => item.id === groupId);
+    if (!group) {
+      return sendJson(res, { error: `agent group not found: ${groupId}` }, 404);
+    }
+    const soulPath = path.join(rootDir, group.soul_path || "");
+    if (typeof body.soulContent === "string" && soulPath) {
+      await mkdir(path.dirname(soulPath), { recursive: true });
+      await writeFile(soulPath, body.soulContent, "utf-8");
+    }
+    if (Array.isArray(body.enabledSkills)) {
+      const bindings = await readAgentSkillBindings();
+      const nextSkills = body.enabledSkills.filter(Boolean);
+      bindings.agents = {
+        ...(bindings.agents || {}),
+      };
+      for (const agentName of group.internal_agents || []) {
+        bindings.agents[agentName] = nextSkills;
+      }
+      await writeAgentSkillBindings(bindings);
+    }
+    return sendJson(res, {
+      success: true,
+      message: "智能体配置已保存。",
+      group: await readAgentGroupSpec(groupId),
     });
   } catch (error) {
     return sendJson(res, { error: error.message }, 500);

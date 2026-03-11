@@ -8,26 +8,27 @@ import json
 
 
 class MultiDBRenderer:
-    """Persist multi-database JSON artifacts and render a simple linked viewer."""
+    """Persist multi-database JSON artifacts and optionally render a thin HTML viewer."""
 
     def __init__(self, out_dir: str | Path) -> None:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-    def render(self, database_plan: Dict[str, Any], multi_db: Dict[str, Any]) -> Dict[str, str]:
+    def render(self, database_plan: Dict[str, Any], multi_db: Dict[str, Any], include_html: bool = False) -> Dict[str, str]:
         plan_path = self.out_dir / "database_plan.json"
         db_path = self.out_dir / "multi_db.json"
-        html_path = self.out_dir / "multi_db.html"
 
         plan_path.write_text(json.dumps(database_plan, indent=2, ensure_ascii=False), encoding="utf-8")
         db_path.write_text(json.dumps(multi_db, indent=2, ensure_ascii=False), encoding="utf-8")
-        html_path.write_text(self._build_html(database_plan, multi_db), encoding="utf-8")
-
-        return {
+        result = {
             "plan": str(plan_path),
             "data": str(db_path),
-            "html": str(html_path),
         }
+        if include_html:
+            html_path = self.out_dir / "multi_db.html"
+            html_path.write_text(self._build_html(database_plan, multi_db), encoding="utf-8")
+            result["html"] = str(html_path)
+        return result
 
     def _build_html(self, database_plan: Dict[str, Any], multi_db: Dict[str, Any]) -> str:
         databases = multi_db.get("databases", [])

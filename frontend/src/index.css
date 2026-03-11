@@ -102,3 +102,70 @@ textarea {
 ::selection {
   background: color-mix(in oklab, var(--primary) 24%, transparent);
 }
+
+@keyframes mv-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes mv-flow {
+  0% {
+    transform: translateX(-30%);
+  }
+  100% {
+    transform: translateX(130%);
+  }
+}
+
+@keyframes mv-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.mv-pulse-dot {
+  animation: mv-pulse 1.5s ease-in-out infinite;
+}
+
+.mv-flow-bar {
+  position: relative;
+  overflow: hidden;
+}
+
+.mv-flow-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--primary) 28%, white) 45%,
+    transparent 100%
+  );
+  animation: mv-flow 1.4s linear infinite;
+}
+
+.mv-shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    color-mix(in oklab, var(--foreground) 60%, white) 50%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: mv-shimmer 2.2s linear infinite;
+}

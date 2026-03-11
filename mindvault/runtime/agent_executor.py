@@ -28,6 +28,7 @@ class AgentExecutor:
         self._project_root = Path(".")
         self._skills_registry_path = self._project_root / "config" / "skills_registry.json"
         self._agent_skill_bindings_path = self._project_root / "config" / "agent_skill_bindings.json"
+        self._agent_groups_path = self._project_root / "config" / "agent_groups.json"
 
     def load_agent(self, agent_path: str | Path) -> Dict[str, Any]:
         """Load and cache a YAML-like agent definition."""
@@ -50,8 +51,10 @@ class AgentExecutor:
         if prompt_path and Path(prompt_path).exists():
             prompt_template = Path(prompt_path).read_text(encoding="utf-8")
 
+        group_spec = self._group_spec_for_agent(agent_name)
+        soul_context = self._build_group_soul_context(agent_name)
         skill_context = self._build_skill_context(agent_name)
-        user_prompt = self._build_prompt(prompt_template, context, skill_context)
+        user_prompt = self._build_prompt(prompt_template, context, soul_context, skill_context)
 
         client = self.router.client_for_task(model_route)
         if client is None:
@@ -70,6 +73,8 @@ class AgentExecutor:
         self.trace.log(
             "agent_executed",
             agent=agent_name,
+            agent_group=group_spec.get("id", ""),
+            agent_group_label=group_spec.get("label", ""),
             task_type=model_route,
             has_error="error" in result,
             error=result.get("error", ""),
@@ -89,7 +94,7 @@ class AgentExecutor:
         return response
 
     @staticmethod
-    def _build_prompt(template: str, context: Dict[str, Any], skill_context: str = "") -> str:
+    def _build_prompt(template: str, context: Dict[str, Any], soul_context: str = "", skill_context: str = "") -> str:
         result = template
         for key, value in context.items():
             placeholder = "{{" + key + "}}"
@@ -98,9 +103,32 @@ class AgentExecutor:
                     result = result.replace(placeholder, json.dumps(value, ensure_ascii=False, indent=2))
                 else:
                     result = result.replace(placeholder, str(value))
+        if soul_context:
+            result = f"{result}\n\n[Group Soul]\n{soul_context}\n"
         if skill_context:
             result = f"{result}\n\n[Enabled Skills]\n{skill_context}\n"
         return result
+
+    def _group_spec_for_agent(self, agent_name: str) -> Dict[str, Any]:
+        config = self._read_json(self._agent_groups_path, {"groups": []})
+        for group in config.get("groups", []):
+            if agent_name in (group.get("internal_agents") or []):
+                return group
+        return {}
+
+    def _build_group_soul_context(self, agent_name: str) -> str:
+        group = self._group_spec_for_agent(agent_name)
+        if not group:
+            return ""
+        soul_path = group.get("soul_path", "")
+        if not soul_path:
+            return ""
+        soul_file = self._project_root / soul_path
+        if not soul_file.exists():
+            return ""
+        content = soul_file.read_text(encoding="utf-8").strip()
+        label = group.get("label", group.get("id", "group"))
+        return f"group: {label}\n{content}"
 
     def _enabled_skills_for_agent(self, agent_name: str) -> List[str]:
         bindings = self._read_json(self._agent_skill_bindings_path, {"agents": {}})

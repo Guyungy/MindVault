@@ -23,7 +23,6 @@ from mindvault.governance.conflict_engine import ConflictEngine
 from mindvault.governance.placeholder_engine import PlaceholderEngine
 from mindvault.governance.schema_evolution import SchemaEvolutionEngine
 from mindvault.governance.memory_curator import MemoryCurator
-from mindvault.runtime.renderers.wiki import WikiExporter
 from mindvault.runtime.renderers.multi_db import MultiDBRenderer
 from parser import ParserAgent as RuleParserAgent
 
@@ -34,7 +33,7 @@ class VaultRuntime:
 
     source → adapt → parse(LLM) → claim_resolve → dedup → relation
       → governance(confidence + conflict + placeholder + schema)
-      → merge canonical → version snapshot → insight → report → dashboard
+      → merge canonical → version snapshot → insight(optional) → report(optional)
     """
 
     def __init__(self, workspace_id: str, config_root: str = "mindvault/config", verbose: bool = False) -> None:
@@ -47,6 +46,9 @@ class VaultRuntime:
         model_config = config_root_path / "model_config.json"
         if not model_config.exists():
             model_config = Path("config/model_config.json")
+        self.runtime_config_path = config_root_path / "runtime_config.json"
+        if not self.runtime_config_path.exists():
+            self.runtime_config_path = Path("config/runtime_config.json")
         self.router = ModelRouter(str(model_config))
         self.executor = AgentExecutor(self.router, self.trace)
 
@@ -75,8 +77,13 @@ class VaultRuntime:
             "chat": ChatAdapter(),
         }
 
-    def ingest(self, sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def ingest(self, sources: List[Dict[str, Any]], profile: str | None = None) -> Dict[str, Any]:
         """Run the full pipeline on a list of source records."""
+        runtime_settings = self._load_runtime_settings()
+        profile = (profile or runtime_settings.get("execution", {}).get("profile") or "fast").strip().lower()
+        if profile not in {"full", "fast"}:
+            profile = "fast"
+        report_enabled = bool(runtime_settings.get("artifacts", {}).get("report"))
         task = TaskRuntime(self.ctx.task_dir, goal="Build structured knowledge databases from input sources.", workspace_id=self.ctx.workspace_id)
         task.start()
         self.trace.log("pipeline_start", workspace=self.ctx.workspace_id, source_count=len(sources), task_id=task.task_id)
@@ -216,12 +223,16 @@ class VaultRuntime:
             task.add_artifact("changelog", version_meta.get("changelog_path", ""))
             task.log_step("versioning", "ok", version=version_meta.get("version"))
 
-            self._mark_task(task, "insight", agent="insight_generator", resume_hint="Generating insight summaries.")
-            insights = self._generate_insights(state)
-            self.kb.append_insights(insights)
-            state = self.kb.state
-            self.trace.log("insight_complete", count=len(insights))
-            task.log_step("insight", "ok", count=len(insights))
+            insights: List[Dict[str, Any]] = []
+            report_path = ""
+
+            if profile == "full" and report_enabled:
+                self._mark_task(task, "insight", agent="insight_generator", resume_hint="Generating insight summaries.")
+                insights = self._generate_insights(state)
+                self.kb.append_insights(insights)
+                state = self.kb.state
+                self.trace.log("insight_complete", count=len(insights))
+                task.log_step("insight", "ok", count=len(insights))
 
             self._mark_task(task, "multi_db", agent="database_builder_agent", resume_hint="Building database plan and multi-db outputs.")
             database_plan = self._generate_database_plan(state, governance)
@@ -232,36 +243,15 @@ class VaultRuntime:
                 task.add_artifact(f"multi_db_{name}", value)
             task.log_step("multi_db", "ok", output=multi_db_paths.get("data", ""))
 
-            report_path = self._run_optional_stage(
-                task=task,
-                step="report",
-                agent="report_agent",
-                resume_hint="Writing report artifact.",
-                runner=lambda: self._write_report(state, insights, governance),
-                optional_failures=optional_failures,
-            )
-
-            dashboard_path = self._run_optional_stage(
-                task=task,
-                step="dashboard",
-                agent="dashboard_renderer",
-                resume_hint="Rendering dashboard.",
-                runner=lambda: self._render_dashboard(state, governance, version_meta),
-                optional_failures=optional_failures,
-            )
-
-            wiki_paths = self._run_optional_stage(
-                task=task,
-                step="wiki",
-                agent="wiki_builder_agent",
-                resume_hint="Rendering wiki pages.",
-                runner=lambda: self._export_wiki(state, governance, version_meta),
-                optional_failures=optional_failures,
-            ) or {}
-            if isinstance(wiki_paths, dict):
-                for name, value in wiki_paths.items():
-                    if isinstance(value, str):
-                        task.add_artifact(f"wiki_{name}", value)
+            if profile == "full" and report_enabled:
+                report_path = self._run_optional_stage(
+                    task=task,
+                    step="report",
+                    agent="report_agent",
+                    resume_hint="Writing report artifact.",
+                    runner=lambda: self._write_report(state, insights, governance),
+                    optional_failures=optional_failures,
+                )
 
             trace_path = self.ctx.root_dir / "agent_trace.json"
             self.trace.save(trace_path)
@@ -274,6 +264,8 @@ class VaultRuntime:
 
             return {
                 "workspace": self.ctx.workspace_id,
+                "profile": profile,
+                "report_enabled": report_enabled,
                 "task": {
                     "task_id": task.task_id,
                     "task_json": str(task.task_path),
@@ -283,9 +275,7 @@ class VaultRuntime:
                 "snapshot": version_meta.get("snapshot_path", ""),
                 "changelog": version_meta.get("changelog_path", ""),
                 "report": report_path or "",
-                "dashboard": dashboard_path or "",
                 "multi_db": multi_db_paths,
-                "wiki": wiki_paths,
                 "trace": str(trace_path),
                 "warnings": optional_failures,
                 "stats": {
@@ -305,6 +295,32 @@ class VaultRuntime:
             self.trace.log("pipeline_failed", error=str(exc), task_id=task.task_id)
             self.trace.save(self.ctx.root_dir / "agent_trace.json")
             raise
+
+    def _load_runtime_settings(self) -> Dict[str, Any]:
+        fallback = {
+            "execution": {"profile": "fast", "engine_mode": "json_engine"},
+            "artifacts": {"report": False},
+        }
+        if not self.runtime_config_path.exists():
+            return fallback
+        try:
+            raw = json.loads(self.runtime_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return fallback
+        execution = raw.get("execution", {}) if isinstance(raw, dict) else {}
+        artifacts = raw.get("artifacts", {}) if isinstance(raw, dict) else {}
+        profile = execution.get("profile", "fast")
+        if profile not in {"fast", "full"}:
+            profile = "fast"
+        return {
+            "execution": {
+                "profile": profile,
+                "engine_mode": "json_engine",
+            },
+            "artifacts": {
+                "report": bool(artifacts.get("report", False)),
+            },
+        }
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
@@ -398,19 +414,9 @@ class VaultRuntime:
         self.ctx.report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
         return str(self.ctx.report_path)
 
-    def _render_dashboard(self, state, governance, version_meta) -> str:
-        from mindvault.runtime.renderers.dashboard import DashboardRenderer
-        renderer = DashboardRenderer(str(self.ctx.visualization_dir))
-        return renderer.render(state, governance, self.trace.entries, version_meta)
-
-    def _export_wiki(self, state, governance, version_meta) -> Dict[str, Any]:
-        exporter = WikiExporter(self.ctx.wiki_dir)
-        wiki_payload = self._generate_wiki_payload(state, governance, version_meta)
-        return exporter.export(state, governance, version_meta, wiki_payload=wiki_payload)
-
     def _export_multi_db(self, database_plan: Dict[str, Any], multi_db: Dict[str, Any]) -> Dict[str, str]:
         renderer = MultiDBRenderer(self.ctx.root_dir / "multi_db")
-        return renderer.render(database_plan, multi_db)
+        return renderer.render(database_plan, multi_db, include_html=False)
 
     def _generate_database_plan(self, state, governance) -> Dict[str, Any]:
         ontology_agent_path = Path("mindvault/agents/ontology_agent.yaml")
@@ -1085,6 +1091,7 @@ def main():
     parser.add_argument("--workspace", "-w", default="default", help="工作区名称")
     parser.add_argument("--input", "-i", required=True, help="输入文件或目录路径，支持 .md/.json/.txt")
     parser.add_argument("--config", "-c", default="mindvault/config", help="配置目录路径")
+    parser.add_argument("--profile", choices=["fast", "full"], default=None, help="运行档位：未指定时跟随运行设置")
     parser.add_argument("--verbose", "-v", action="store_true", help="显示流水线细颗粒度进度信息")
     args = parser.parse_args()
 
@@ -1099,7 +1106,7 @@ def main():
         sys.exit(1)
 
     runtime = VaultRuntime(args.workspace, config_root=args.config, verbose=args.verbose)
-    result = runtime.ingest(sources)
+    result = runtime.ingest(sources, profile=args.profile)
 
     print("✅ Pipeline 完成")
     print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -29,9 +29,9 @@
     }
   },
   "routing": {
-    "parse": "siliconflow_deepseek_v31_terminus",
-    "insight": "siliconflow_deepseek_v31_terminus",
-    "report": "siliconflow_deepseek_v31_terminus",
+    "parse": "gpt52_model",
+    "insight": "gpt52_model",
+    "report": "gpt52_model",
     "multi_db": "siliconflow_deepseek_v31_terminus"
   }
 }
