@@ -32,9 +32,9 @@
     }
   },
   "routing": {
-    "parse": "siliconflow_deepseek_v32",
-    "insight": "siliconflow_deepseek_v32",
-    "report": "siliconflow_deepseek_v32",
+    "parse": "gpt52_model",
+    "insight": "gpt52_model",
+    "report": "gpt52_model",
     "multi_db": "siliconflow_deepseek_v31_terminus"
   }
 }
