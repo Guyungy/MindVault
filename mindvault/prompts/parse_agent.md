@@ -14,6 +14,8 @@
 - source_id: {{source_id}}
 - source_type: {{source_type}}
 - language: {{language}}
+- context_note: {{context_note}}
+- speakers: {{speakers}}
 
 ## 你的任务
 
@@ -94,3 +96,11 @@
 3. 如果不确定某个信息的真实性，设置 claim_type 为 uncertain 并降低 confidence
 4. 不要编造文本中没有的信息
 5. 保留原文语言（中文则继续用中文作为 name 和 description）
+6. 如果 source_type 是 `chat`，优先提取：
+   - 说话人实体
+   - 可长期复用的人物特征、偏好、边界、状态
+   - 双方互动事件（提问、安慰、冲突、夸赞、拒绝、讨论）
+   - 关系信号（亲密、疏离、支持、边界）
+7. 如果 context_note 提到“个人数据库”或“个人信息数据库”，不要把输出做成泛泛的 `organization/area/service` 风格；优先输出对人物档案和互动记录有用的信息。
+8. 对聊天记录，不要把“别人”“她们”“有人”这类泛指代词轻易当成稳定实体；只有反复出现且可追踪时才建实体。
+9. 对聊天记录，优先少而准，不要为了凑数量生造 claim。

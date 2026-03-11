@@ -1,8 +1,18 @@
 {
   "providers": {
+    "siliconflow_deepseek_v32": {
+      "title": "硅基流动 DeepSeek V3.2",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "api_key": "sk-xcqcptkpzayeqvvkyhmkvsovubkidbizhcybckfwpqkspvnh",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "timeout_seconds": 180,
+      "max_retries": 3,
+      "retry_backoff_seconds": 1.0
+    },
     "gpt52_model": {
-      "base_url": "https://xnuffwyczfry.ap-northeast-1.clawcloudrun.com/v1",
-      "api_key": "sk-xCpyTCYXi9wC47hoOsCa13O6PgBw",
+      "title": "2API GPT-5.2",
+      "base_url": "https://2api.olii.cc/v1",
+      "api_key": "sk-f332d5dedf8f487568832ed621adc71b434d5ccadb4e3fbc9766a9ff2fd1c265",
       "model": "gpt-5.2",
       "timeout_seconds": 180,
       "max_retries": 3,
@@ -10,8 +20,8 @@
     }
   },
   "routing": {
-    "parse": "gpt52_model",
-    "insight": "gpt52_model",
-    "report": "gpt52_model"
+    "parse": "siliconflow_deepseek_v32",
+    "insight": "siliconflow_deepseek_v32",
+    "report": "siliconflow_deepseek_v32"
   }
 }

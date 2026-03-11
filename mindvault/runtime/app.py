@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -85,7 +86,9 @@ class VaultRuntime:
             self._mark_task(task, "ingest", resume_hint="Persisting raw sources.")
             for src in sources:
                 src.setdefault("source_id", f"src_{hashlib.md5(src.get('content', '')[:200].encode()).hexdigest()[:8]}")
-                src.setdefault("source_type", self._detect_source_type(src))
+                detected_type = self._detect_source_type(src)
+                if not src.get("source_type") or (src.get("source_type") == "doc" and detected_type != "doc"):
+                    src["source_type"] = detected_type
                 src.setdefault("ingested_at", datetime.utcnow().isoformat())
 
             raw_path = self.ctx.raw_dir / "sources.json"
@@ -116,8 +119,11 @@ class VaultRuntime:
                     "source_id": chunk.source_id,
                     "source_type": chunk.context_hints.get("source_type", "doc"),
                     "language": chunk.context_hints.get("language", "en"),
+                    "context_note": chunk.context_hints.get("note", ""),
+                    "speakers": chunk.context_hints.get("speakers", []),
                 }
                 result = self.executor.execute(parse_agent_path, context)
+                self._raise_on_agent_error(result, "parse_agent")
 
                 if isinstance(result, dict) and "claims" in result:
                     normalized = self._normalize_parse_result(result, chunk)
@@ -288,10 +294,11 @@ class VaultRuntime:
 
     def _detect_source_type(self, source: Dict[str, Any]) -> str:
         st = source.get("source_type", "")
-        if st:
+        if st and st != "doc":
             return st
         content = source.get("content", "")
-        if any(k in content for k in ["[", "：", ":"]) and "\n" in content:
+        note = json.dumps(source.get("context_hints", {}), ensure_ascii=False)
+        if self._looks_like_chat(content) or "聊天" in note or "个人数据库" in note or "个人信息数据库" in note:
             return "chat"
         return "doc"
 
@@ -345,6 +352,7 @@ class VaultRuntime:
                 "relations": state.get("relations", [])
             }
             result = self.executor.execute(report_agent_path, context)
+            self._raise_on_agent_error(result, "report_agent")
             if isinstance(result, dict) and "business_domain" in result:
                 return result
             elif isinstance(result, dict) and result.get("content") and isinstance(result["content"], dict):
@@ -394,6 +402,7 @@ class VaultRuntime:
                 "governance": governance,
             }
             result = self.executor.execute(ontology_agent_path, context)
+            self._raise_on_agent_error(result, "ontology_agent")
             if isinstance(result, dict) and isinstance(result.get("databases"), list):
                 return self._finalize_database_plan(result)
         return self._finalize_database_plan(self._fallback_database_plan(state))
@@ -409,6 +418,7 @@ class VaultRuntime:
                 "events": state.get("events", []),
             }
             result = self.executor.execute(database_builder_agent_path, context)
+            self._raise_on_agent_error(result, "database_builder_agent")
             if isinstance(result, dict) and isinstance(result.get("databases"), list):
                 return self._finalize_multi_db(result, database_plan)
         return self._finalize_multi_db(self._fallback_multi_db(state, database_plan), database_plan)
@@ -427,9 +437,15 @@ class VaultRuntime:
             "version_meta": version_meta,
         }
         result = self.executor.execute(wiki_agent_path, context)
+        self._raise_on_agent_error(result, "wiki_builder_agent")
         if isinstance(result, dict) and isinstance(result.get("pages"), list):
             return result
         return None
+
+    @staticmethod
+    def _raise_on_agent_error(result: Dict[str, Any] | Any, agent_name: str) -> None:
+        if isinstance(result, dict) and result.get("_agent_error"):
+            raise RuntimeError(f"{agent_name} failed: {result['_agent_error']}")
 
     def _fallback_database_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
         entity_types = sorted({entity.get("type", "unknown") for entity in state.get("entities", [])})
@@ -647,6 +663,8 @@ class VaultRuntime:
         return "system" if name in {"claims", "relations", "sources"} else "business"
 
     def _fallback_parse_chunk(self, chunk) -> Dict[str, Any]:
+        if chunk.context_hints.get("source_type") == "chat" or self._looks_like_chat(chunk.text):
+            return self._fallback_parse_chat_chunk(chunk)
         docs = [{
             "text": chunk.text,
             "source": chunk.source_id,
@@ -655,6 +673,186 @@ class VaultRuntime:
         }]
         result = self.rule_parser.parse(docs, workspace_id=self.ctx.workspace_id)
         return self._normalize_parse_result(result, chunk)
+
+    @staticmethod
+    def _looks_like_chat(text: str) -> bool:
+        lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+        if len(lines) < 3:
+            return False
+        chat_lines = 0
+        for line in lines[:30]:
+            if ":" in line or "：" in line or line.startswith("["):
+                prefix = re.split(r"[:：\]]", line, maxsplit=1)[0].strip("[ ")
+                if 0 < len(prefix) <= 24:
+                    chat_lines += 1
+        return chat_lines >= max(3, len(lines) // 3)
+
+    def _fallback_parse_chat_chunk(self, chunk) -> Dict[str, Any]:
+        messages = ChatAdapter._parse_messages(chunk.text)
+        source_id = chunk.source_id
+        speakers = []
+        for message in messages:
+            author = (message.get("author") or "unknown").strip()
+            if author and author not in speakers and author != "unknown":
+                speakers.append(author)
+
+        speaker_ids = {speaker: f"ent_person_{self._slug_name(speaker)}" for speaker in speakers}
+        entities: List[Dict[str, Any]] = []
+        claims: List[Dict[str, Any]] = []
+        relations: List[Dict[str, Any]] = []
+        events: List[Dict[str, Any]] = []
+
+        speaker_stats: Dict[str, Dict[str, Any]] = {
+            speaker: {"message_count": 0, "tone_tags": set(), "signals": []} for speaker in speakers
+        }
+
+        primary_target = speakers[1] if len(speakers) == 2 else ""
+        for idx, message in enumerate(messages, start=1):
+            speaker = (message.get("author") or "unknown").strip()
+            text = (message.get("text") or "").strip()
+            if not text or speaker == "unknown" or speaker not in speaker_ids:
+                continue
+
+            speaker_stats[speaker]["message_count"] += 1
+            target = next((name for name in speakers if name != speaker), primary_target)
+            tone_tags = self._chat_tone_tags(text)
+            speaker_stats[speaker]["tone_tags"].update(tone_tags)
+
+            for predicate, value, claim_type in self._chat_claims_for_message(text, speaker, target, source_id, idx):
+                claims.append({
+                    "claim_id": f"claim_chat_{idx}_{len(claims)+1:03d}",
+                    "subject": speaker_ids[speaker],
+                    "predicate": predicate,
+                    "object": value,
+                    "claim_text": text,
+                    "claim_type": claim_type,
+                    "confidence": 0.62 if claim_type == "fact" else 0.52,
+                    "source_ref": source_id,
+                    "source_refs": [source_id],
+                    "status": "active",
+                })
+
+            event_type = self._chat_event_type(text)
+            if event_type:
+                participant_ids = [speaker_ids[speaker]]
+                if target and target in speaker_ids:
+                    participant_ids.append(speaker_ids[target])
+                events.append({
+                    "event_id": f"evt_chat_{idx:03d}",
+                    "type": event_type,
+                    "description": text,
+                    "participants": participant_ids,
+                    "timestamp": None,
+                    "source_refs": [source_id],
+                    "status": "active",
+                })
+
+            if target and target in speaker_ids:
+                relation_type = self._chat_relation_type(text)
+                if relation_type:
+                    relations.append({
+                        "source_entity": speaker_ids[speaker],
+                        "target_entity": speaker_ids[target],
+                        "relation_type": relation_type,
+                        "evidence": text,
+                        "source_refs": [source_id],
+                        "status": "active",
+                    })
+
+        for speaker in speakers:
+            stats = speaker_stats[speaker]
+            attributes = {
+                "message_count": stats["message_count"],
+                "tone_tags": sorted(stats["tone_tags"]),
+            }
+            entities.append({
+                "entity_id": speaker_ids[speaker],
+                "type": "person",
+                "name": speaker,
+                "attributes": attributes,
+                "source_refs": [source_id],
+                "status": "active",
+            })
+
+        if len(speakers) == 2:
+            relations.append({
+                "source_entity": speaker_ids[speakers[0]],
+                "target_entity": speaker_ids[speakers[1]],
+                "relation_type": "interacts_with",
+                "evidence": f"对话中双方都有发言，共 {len(messages)} 条消息。",
+                "source_refs": [source_id],
+                "status": "active",
+            })
+
+        return self._normalize_parse_result({
+            "claims": claims,
+            "entity_candidates": entities,
+            "relation_candidates": relations,
+            "event_candidates": events,
+        }, chunk)
+
+    @staticmethod
+    def _chat_tone_tags(text: str) -> List[str]:
+        tags: List[str] = []
+        if any(token in text for token in ["哈哈", "笑死", "😄", "😂"]):
+            tags.append("轻松")
+        if any(token in text for token in ["宝宝", "宝贝", "好看", "可爱", "🥺", "👉"]):
+            tags.append("亲密")
+        if any(token in text for token in ["困", "睡", "累"]):
+            tags.append("疲惫")
+        if any(token in text for token in ["侮辱", "背刺", "骂", "攻击", "尖酸刻薄"]):
+            tags.append("冲突")
+        return tags
+
+    def _chat_claims_for_message(self, text: str, speaker: str, target: str, source_id: str, idx: int):
+        claims: List[tuple[str, str, str]] = []
+        if any(token in text for token in ["好看", "可爱", "精致"]):
+            claims.append(("positive_impression", text, "opinion"))
+        if any(token in text for token in ["喜欢", "忍不住", "舍不得"]):
+            claims.append(("preference_signal", text, "opinion"))
+        if text.startswith("我") and any(token in text for token in ["困", "睡", "不困"]):
+            claims.append(("current_state", text, "fact"))
+        if any(token in text for token in ["去睡吧", "慢慢来", "没事"]):
+            claims.append(("care_signal", text, "fact"))
+        if any(token in text for token in ["拒绝", "不要"]):
+            claims.append(("boundary_signal", text, "fact"))
+        if any(token in text for token in ["侮辱", "背刺", "攻击", "骂", "尖酸刻薄"]):
+            claims.append(("conflict_experience", text, "fact"))
+        if any(token in text for token in ["问", "吗", "？", "?"]):
+            claims.append(("question_or_confirmation", text, "uncertain"))
+        if target and any(token in text for token in ["宝宝", "宝贝"]):
+            claims.append(("addresses_affectionately", target, "fact"))
+        return claims
+
+    @staticmethod
+    def _chat_event_type(text: str) -> str:
+        if any(token in text for token in ["侮辱", "背刺", "攻击", "骂", "尖酸刻薄"]):
+            return "conflict_discussion"
+        if any(token in text for token in ["好看", "可爱", "精致"]):
+            return "compliment"
+        if any(token in text for token in ["去睡吧", "慢慢来", "没事"]):
+            return "care"
+        if any(token in text for token in ["困", "睡"]):
+            return "rest_discussion"
+        if any(token in text for token in ["问", "吗", "？", "?"]):
+            return "question"
+        return ""
+
+    @staticmethod
+    def _chat_relation_type(text: str) -> str:
+        if any(token in text for token in ["宝宝", "宝贝", "好看", "可爱", "🥺", "👉"]):
+            return "close_to"
+        if any(token in text for token in ["去睡吧", "慢慢来", "没事"]):
+            return "cares_about"
+        if any(token in text for token in ["拒绝", "不要"]):
+            return "sets_boundary_with"
+        if any(token in text for token in ["侮辱", "背刺", "攻击", "骂", "尖酸刻薄"]):
+            return "shares_conflict_with"
+        return ""
+
+    @staticmethod
+    def _slug_name(value: str) -> str:
+        return "".join(ch.lower() if ch.isalnum() else "_" for ch in value).strip("_") or "unknown"
 
     def _normalize_parse_result(self, result: Dict[str, Any], chunk) -> Dict[str, Any]:
         source_id = chunk.source_id

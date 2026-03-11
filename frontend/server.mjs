@@ -14,6 +14,7 @@ const distDir = path.join(__dirname, "dist");
 const publicDir = existsSync(distDir) ? distDir : path.join(__dirname, "public");
 const workspacesDir = path.join(rootDir, "output", "workspaces");
 const agentsDir = path.join(rootDir, "mindvault", "agents");
+const modelConfigPath = path.join(rootDir, "config", "model_config.json");
 const port = Number(process.env.PORT || 4310);
 const host = process.env.HOST || "127.0.0.1";
 
@@ -46,6 +47,15 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname === "/api/agents" && req.method === "GET") {
     return sendJson(res, await listAgentSpecs());
+  }
+
+  if (url.pathname === "/api/models") {
+    if (req.method === "GET") {
+      return sendJson(res, await readModelConfig());
+    }
+    if (req.method === "PUT") {
+      return handleModelConfigUpdate(req, res);
+    }
   }
 
   if (url.pathname.startsWith("/api/agents/")) {
@@ -194,6 +204,53 @@ async function readAgentSpec(agentName) {
     configContent,
     promptContent,
   };
+}
+
+async function readModelConfig() {
+  const config = await readJsonSafe(modelConfigPath, { providers: {}, routing: {} });
+  const providers = Object.entries(config.providers || {}).map(([id, provider]) => ({
+    id,
+    title: provider.title || provider.model || id,
+    base_url: provider.base_url || "",
+    model: provider.model || "",
+    timeout_seconds: Number(provider.timeout_seconds || 120),
+    max_retries: Number(provider.max_retries || 2),
+  }));
+  const routing = config.routing || {};
+  const currentProviderId = routing.parse || "";
+  return {
+    providers,
+    routing,
+    currentProviderId,
+    currentProvider: providers.find((provider) => provider.id === currentProviderId) || null,
+  };
+}
+
+async function handleModelConfigUpdate(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const providerId = String(body?.providerId || "").trim();
+    const config = await readJsonSafe(modelConfigPath, { providers: {}, routing: {} });
+    if (!providerId || !config.providers?.[providerId]) {
+      return sendJson(res, { error: "provider not found" }, 404);
+    }
+
+    config.routing = {
+      ...(config.routing || {}),
+      parse: providerId,
+      insight: providerId,
+      report: providerId,
+    };
+
+    await writeFile(modelConfigPath, JSON.stringify(config, null, 2), "utf-8");
+    return sendJson(res, {
+      success: true,
+      message: "默认模型已切换。",
+      ...(await readModelConfig()),
+    });
+  } catch (error) {
+    return sendJson(res, { error: error.message }, 500);
+  }
 }
 
 async function handleAgentUpdate(req, res, agentName) {

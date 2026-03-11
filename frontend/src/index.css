@@ -3,7 +3,7 @@
 :root {
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   color: #1c1917;
-  background: #f5efe6;
+  background: #f7f3ec;
 }
 
 html,
@@ -14,10 +14,14 @@ body,
 
 body {
   margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(13, 148, 136, 0.08), transparent 28%),
+    linear-gradient(180deg, #f7f3ec 0%, #f4efe7 100%);
 }
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }

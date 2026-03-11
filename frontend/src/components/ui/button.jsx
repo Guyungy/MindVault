@@ -11,8 +11,8 @@ const buttonVariants = cva(
         default: "bg-stone-900 text-stone-50 hover:bg-stone-800",
         outline: "border border-stone-300 bg-white text-stone-900 hover:bg-stone-50",
         ghost: "text-stone-700 hover:bg-stone-100",
-        nav: "w-full justify-start border border-stone-200 bg-white text-stone-700 hover:bg-stone-100",
-        activeNav: "w-full justify-start bg-teal-800 text-white shadow-sm",
+        nav: "w-full justify-start rounded-lg border border-transparent bg-transparent text-stone-600 hover:bg-stone-100 hover:text-stone-900",
+        activeNav: "w-full justify-start rounded-lg bg-teal-50 text-teal-900",
       },
       size: {
         default: "h-10 px-4 py-2",

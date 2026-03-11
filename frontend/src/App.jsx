@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,43 +19,146 @@ const views = [
   { id: "agents", label: "智能体", icon: GitBranch },
 ];
 
+function parseHashRoute() {
+  const raw = window.location.hash.replace(/^#/, "");
+  const segments = raw.split("/").filter(Boolean);
+  if (!segments.length) {
+    return { workspaceId: "", view: "overview", tableName: "", taskId: "", agentGroupId: "", agentName: "" };
+  }
+  if (segments[0] === "workspace") {
+    const view = segments[2] || "overview";
+    return {
+      workspaceId: decodeURIComponent(segments[1] || ""),
+      view,
+      tableName: view === "tables" ? decodeURIComponent(segments[3] || "") : "",
+      taskId: view === "tasks" ? decodeURIComponent(segments[3] || "") : "",
+      agentGroupId: view === "agents" ? decodeURIComponent(segments[3] || "") : "",
+      agentName: view === "agents" ? decodeURIComponent(segments[4] || "") : "",
+    };
+  }
+  return { workspaceId: "", view: "overview", tableName: "", taskId: "", agentGroupId: "", agentName: "" };
+}
+
+function writeHashRoute(workspaceId, view, options = {}) {
+  const { tableName = "", taskId = "", agentGroupId = "", agentName = "" } = options;
+  let nextHash = "#/";
+  if (workspaceId) {
+    nextHash = `#/workspace/${encodeURIComponent(workspaceId)}/${view || "overview"}`;
+    if (view === "tables" && tableName) {
+      nextHash += `/${encodeURIComponent(tableName)}`;
+    }
+    if (view === "tasks" && taskId) {
+      nextHash += `/${encodeURIComponent(taskId)}`;
+    }
+    if (view === "agents" && agentGroupId) {
+      nextHash += `/${encodeURIComponent(agentGroupId)}`;
+      if (agentName) {
+        nextHash += `/${encodeURIComponent(agentName)}`;
+      }
+    }
+  }
+  if (window.location.hash !== nextHash) {
+    window.location.hash = nextHash;
+  }
+}
+
 const AGENT_GROUPS = [
   {
     id: "modeling",
     label: "建库组",
     description: "决定知识结构、数据表规划和最终多表输出。",
+    primaryAgent: "ontology_agent",
     agents: ["ontology_agent", "database_builder_agent"],
   },
   {
     id: "parsing",
     label: "解析组",
     description: "负责抽取、关系识别、去重与 schema 初步组织。",
+    primaryAgent: "parse_agent",
     agents: ["parse_agent", "relation_agent", "dedup_agent", "schema_designer_agent", "placeholder_agent"],
   },
   {
     id: "governance",
     label: "治理组",
     description: "负责 claim 解析后的冲突审计和可信治理。",
+    primaryAgent: "claim_resolver_agent",
     agents: ["claim_resolver_agent", "conflict_auditor_agent"],
   },
   {
     id: "publishing",
     label: "输出组",
     description: "负责洞察、报告和 wiki 输出。",
+    primaryAgent: "report_agent",
     agents: ["insight_agent", "report_agent", "wiki_builder_agent"],
   },
 ];
 
+const AGENT_LABELS = {
+  claim_resolver_agent: "事实解析智能体",
+  conflict_auditor_agent: "冲突审计智能体",
+  database_builder_agent: "数据表构建智能体",
+  dedup_agent: "去重智能体",
+  insight_agent: "洞察智能体",
+  ontology_agent: "结构规划智能体",
+  parse_agent: "解析智能体",
+  placeholder_agent: "占位补全智能体",
+  relation_agent: "关系识别智能体",
+  report_agent: "报告智能体",
+  schema_designer_agent: "结构设计智能体",
+  wiki_builder_agent: "知识页生成智能体",
+  schema_engine: "结构引擎",
+  memory_curator: "记忆整理器",
+  knowledge_store: "知识存储器",
+  governance: "治理引擎",
+  version_store: "版本存储器",
+  insight_generator: "洞察生成器",
+  dashboard_renderer: "控制台渲染器",
+  system: "系统步骤",
+};
+
+const STEP_LABELS = {
+  ingest: "资料接收",
+  adapt: "内容切分",
+  parse: "知识解析",
+  merge: "知识合并",
+  governance: "治理审计",
+  dashboard: "控制台渲染",
+  multi_db: "数据表生成",
+  wiki: "知识页生成",
+  report: "报告生成",
+  insight: "洞察生成",
+};
+
+const TRACE_EVENT_LABELS = {
+  agent_executed: "智能体执行",
+  parse_chunk: "分块解析",
+  task_started: "任务开始",
+  task_completed: "任务完成",
+  task_failed: "任务失败",
+};
+
+const CORE_PHASES = [
+  { id: "intake", label: "资料接收", actions: ["pipeline_start", "ingest", "adapt"] },
+  { id: "parse", label: "知识解析", actions: ["parse"] },
+  { id: "curate", label: "知识整理", actions: ["confidence", "schema", "curation", "merge", "governance", "versioning"] },
+  { id: "output", label: "内容生成", actions: ["insight", "report", "dashboard"] },
+  { id: "tables", label: "数据表生成", actions: ["multi_db", "wiki", "pipeline"] },
+];
+
 export default function App() {
+  const initialRoute = typeof window !== "undefined" ? parseHashRoute() : { workspaceId: "", view: "overview" };
   const [workspaces, setWorkspaces] = useState([]);
-  const [workspaceId, setWorkspaceId] = useState("");
+  const [workspaceId, setWorkspaceId] = useState(initialRoute.workspaceId || "");
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [workspaceCreateStatus, setWorkspaceCreateStatus] = useState(null);
   const [payload, setPayload] = useState(null);
+  const [modelConfig, setModelConfig] = useState(null);
+  const [selectedProviderId, setSelectedProviderId] = useState("");
+  const [modelSaveStatus, setModelSaveStatus] = useState(null);
   const [error, setError] = useState("");
-  const [activeView, setActiveView] = useState("overview");
-  const [activeTable, setActiveTable] = useState("");
-  const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [activeView, setActiveView] = useState(initialRoute.view || "overview");
+  const [activeTable, setActiveTable] = useState(initialRoute.tableName || "");
+  const [selectedTaskId, setSelectedTaskId] = useState(initialRoute.taskId || "");
   const [agentList, setAgentList] = useState([]);
   const [selectedAgentGroupId, setSelectedAgentGroupId] = useState("modeling");
   const [selectedAgentName, setSelectedAgentName] = useState("");
@@ -106,18 +210,57 @@ export default function App() {
   useEffect(() => {
     loadWorkspaces();
     loadAgents();
+    loadModels();
   }, []);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const route = parseHashRoute();
+      if (route.workspaceId && route.workspaceId !== workspaceId) {
+        setWorkspaceId(route.workspaceId);
+      }
+      if (route.view && route.view !== activeView && views.some((view) => view.id === route.view)) {
+        setActiveView(route.view);
+      }
+      if (route.view === "tables" && route.tableName !== activeTable) {
+        setActiveTable(route.tableName);
+      }
+      if (route.view === "tasks" && route.taskId !== selectedTaskId) {
+        setSelectedTaskId(route.taskId);
+      }
+      if (route.view === "agents" && route.agentGroupId && route.agentGroupId !== selectedAgentGroupId) {
+        setSelectedAgentGroupId(route.agentGroupId);
+      }
+      if (route.view === "agents" && route.agentName !== selectedAgentName) {
+        setSelectedAgentName(route.agentName);
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [workspaceId, activeView, activeTable, selectedTaskId, selectedAgentGroupId, selectedAgentName]);
 
   useEffect(() => {
     if (!workspaceId) return;
     setPayload(null);
     setQuery("");
     setShowSystemTables(false);
-    setActiveTable("");
-    setSelectedTaskId("");
+    setActiveTable((current) => (workspaceId !== initialRoute.workspaceId ? "" : current));
+    setSelectedTaskId((current) => (workspaceId !== initialRoute.workspaceId ? "" : current));
     setIngestStatus(null);
     loadWorkspace(workspaceId);
   }, [workspaceId]);
+
+  useEffect(() => {
+    if (!workspaceId && workspaces[0]?.id) {
+      return;
+    }
+    writeHashRoute(workspaceId, activeView, {
+      tableName: activeView === "tables" ? activeTable : "",
+      taskId: activeView === "tasks" ? selectedTaskId : "",
+      agentGroupId: activeView === "agents" ? selectedAgentGroupId : "",
+      agentName: activeView === "agents" ? selectedAgentName : "",
+    });
+  }, [workspaceId, activeView, activeTable, selectedTaskId, selectedAgentGroupId, selectedAgentName, workspaces]);
 
   useEffect(() => {
     if (!visibleTables.length) return;
@@ -156,8 +299,13 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedAgentGroup) return;
-    if (!selectedAgentGroup.items.some((agent) => agent.name === selectedAgentName)) {
-      setSelectedAgentName(selectedAgentGroup.items[0]?.name || "");
+    const preferredName =
+      (selectedAgentGroup.primaryAgent &&
+      selectedAgentGroup.items.some((agent) => agent.name === selectedAgentGroup.primaryAgent)
+        ? selectedAgentGroup.primaryAgent
+        : selectedAgentGroup.items[0]?.name) || "";
+    if (!selectedAgentGroup.items.some((agent) => agent.name === selectedAgentName) || selectedAgentName !== preferredName) {
+      setSelectedAgentName(preferredName);
     }
   }, [selectedAgentGroup, selectedAgentName]);
 
@@ -168,7 +316,13 @@ export default function App() {
       const available = result.workspaces || [];
       setWorkspaces(available);
       if (available[0]) {
-        setWorkspaceId((current) => current || available[0].id);
+        setWorkspaceId((current) => {
+          const preferred = current || initialRoute.workspaceId;
+          if (preferred && available.some((workspace) => workspace.id === preferred)) {
+            return preferred;
+          }
+          return available[0].id;
+        });
       } else {
         setError("没有可用的工作空间。");
       }
@@ -182,12 +336,53 @@ export default function App() {
       const result = await fetchJson("/api/agents");
       const items = result.agents || [];
       setAgentList(items);
-      const initialGroup = AGENT_GROUPS.find((group) => group.agents.some((agent) => items.some((item) => item.name === agent)));
-      const initialName = initialGroup?.agents.find((agent) => items.some((item) => item.name === agent)) || items[0]?.name || "";
+      const route = parseHashRoute();
+      const initialGroup =
+        AGENT_GROUPS.find((group) => group.id === route.agentGroupId && group.agents.some((agent) => items.some((item) => item.name === agent))) ||
+        AGENT_GROUPS.find((group) => group.agents.some((agent) => items.some((item) => item.name === agent)));
+      const initialName =
+        (route.agentName && items.some((item) => item.name === route.agentName) ? route.agentName : "") ||
+        (initialGroup?.primaryAgent && items.some((item) => item.name === initialGroup.primaryAgent) ? initialGroup.primaryAgent : "") ||
+        initialGroup?.agents.find((agent) => items.some((item) => item.name === agent)) ||
+        items[0]?.name ||
+        "";
       setSelectedAgentGroupId(initialGroup?.id || "modeling");
       setSelectedAgentName(initialName);
     } catch (err) {
       setError(err.message);
+    }
+  }
+
+  async function loadModels() {
+    try {
+      const result = await fetchJson("/api/models");
+      setModelConfig(result);
+      setSelectedProviderId(result.currentProviderId || "");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function saveModelSelection() {
+    if (!selectedProviderId) return;
+    try {
+      setModelSaveStatus({ ok: true, message: "正在切换模型..." });
+      const response = await fetch("/api/models", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ providerId: selectedProviderId }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result?.error || `Request failed: ${response.status}`);
+      }
+      setModelConfig(result);
+      setSelectedProviderId(result.currentProviderId || selectedProviderId);
+      setModelSaveStatus({ ok: true, message: result.message || "默认模型已切换。" });
+    } catch (err) {
+      setModelSaveStatus({ ok: false, message: err.message });
     }
   }
 
@@ -239,8 +434,14 @@ export default function App() {
       const nextTables = result.tables || result.multiDb?.databases || [];
       const nextBusiness = nextTables.find((table) => table.visibility !== "system");
       const nextSystem = nextTables.find((table) => table.visibility === "system");
-      setActiveTable(nextBusiness?.name || nextSystem?.name || "");
-      setSelectedTaskId(result.latestTask?.task_id || "");
+      setActiveTable((current) => {
+        if (current && nextTables.some((table) => table.name === current)) return current;
+        return nextBusiness?.name || nextSystem?.name || "";
+      });
+      setSelectedTaskId((current) => {
+        if (current && (result.tasks || []).some((task) => task.task_id === current)) return current;
+        return result.latestTask?.task_id || "";
+      });
     } catch (err) {
       setError(err.message);
     }
@@ -313,18 +514,18 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[linear-gradient(180deg,#f8f3ea_0%,#efe7db_100%)] text-stone-900">
+    <div className="min-h-screen text-stone-900">
       {error ? <div className="bg-rose-900 px-4 py-3 text-sm text-rose-50">{error}</div> : null}
-      <div className="grid min-h-screen lg:grid-cols-[280px_1fr]">
-        <aside className="bg-white/65 p-6 backdrop-blur-sm">
-          <div className="mb-8">
+      <div className="grid min-h-screen lg:grid-cols-[248px_1fr]">
+        <aside className="border-r border-stone-200/80 bg-white/55 p-5 backdrop-blur-sm">
+          <div className="mb-6">
             <div className="text-xs uppercase tracking-[0.32em] text-stone-500">MindVault</div>
-            <h1 className="mt-2 text-2xl font-semibold">控制台</h1>
+            <h1 className="mt-2 text-xl font-semibold">控制台</h1>
           </div>
 
-          <label className="mb-2 block text-xs uppercase tracking-[0.16em] text-stone-500">Workspace</label>
-          <select
-            className="mb-6 flex h-10 w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-teal-700"
+          <label className="mb-2 block text-xs uppercase tracking-[0.16em] text-stone-500">工作空间</label>
+          <Select
+            className="mb-5 bg-white"
             value={workspaceId}
             onChange={(event) => setWorkspaceId(event.target.value)}
           >
@@ -333,12 +534,12 @@ export default function App() {
                 {workspace.id}
               </option>
             ))}
-          </select>
+          </Select>
 
-          <div className="mb-6 space-y-2 rounded-2xl bg-white/70 p-3 shadow-sm">
+          <div className="mb-5 space-y-2">
             <div className="text-xs uppercase tracking-[0.16em] text-stone-500">新建工作空间</div>
             <Input
-              className="h-10 rounded-xl"
+              className="h-10 bg-white"
               placeholder="例如 project_alpha"
               value={newWorkspaceName}
               onChange={(event) => setNewWorkspaceName(event.target.value)}
@@ -370,24 +571,53 @@ export default function App() {
           </div>
         </aside>
 
-        <main className="p-6 lg:p-8">
-          <header className="mb-6 flex flex-col gap-4 rounded-[28px] bg-white/75 p-6 shadow-sm lg:flex-row lg:items-end lg:justify-between">
-            <div>
+        <main className="p-5 lg:p-6">
+          <header className="mb-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+              <div>
               <div className="text-xs uppercase tracking-[0.24em] text-teal-700">工作区</div>
               <h2 className="mt-2 text-3xl font-semibold">{payload?.workspace || "加载中"}</h2>
               <p className="mt-2 max-w-2xl text-sm text-stone-500">
                 {payload?.multiDb?.domain || "显示当前工作区的多表数据、任务状态与智能体轨迹。"}
               </p>
             </div>
-            <label className="flex w-full max-w-sm items-center gap-3 rounded-2xl bg-white px-4 py-3 shadow-sm">
-              <Search className="h-4 w-4 text-stone-400" />
-              <Input
-                className="h-auto border-0 bg-transparent px-0 py-0 shadow-none focus-visible:ring-0"
-                placeholder="搜索当前数据表..."
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-            </label>
+              <div className="grid gap-3 lg:min-w-[640px] lg:grid-cols-[1fr_320px]">
+                <div className="flex items-center gap-3 rounded-2xl border border-stone-200/80 bg-white/82 px-4 py-3">
+                  <Search className="h-4 w-4 text-stone-400" />
+                  <Input
+                    className="h-auto border-0 bg-transparent px-0 py-0 shadow-none focus-visible:ring-0"
+                    placeholder="搜索当前数据表..."
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </div>
+                <div className="flex items-center gap-3 rounded-2xl border border-stone-200/80 bg-white/82 px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs uppercase tracking-[0.16em] text-stone-500">默认模型</div>
+                    <div className="mt-1 truncate text-sm font-medium text-stone-900">
+                      {modelConfig?.currentProvider?.title || "未配置"}
+                    </div>
+                  </div>
+                  <Select
+                    className="max-w-[220px] border-0 bg-transparent px-0"
+                    value={selectedProviderId}
+                    onChange={(event) => setSelectedProviderId(event.target.value)}
+                  >
+                    {(modelConfig?.providers || []).map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.title} · {provider.model}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button size="sm" onClick={saveModelSelection} disabled={!selectedProviderId || selectedProviderId === modelConfig?.currentProviderId}>
+                    切换模型
+                  </Button>
+                </div>
+              </div>
+            </div>
+            {modelSaveStatus ? (
+              <div className={`mt-3 text-sm ${modelSaveStatus.ok ? "text-teal-700" : "text-rose-700"}`}>{modelSaveStatus.message}</div>
+            ) : null}
           </header>
 
           {activeView === "overview" ? (
@@ -475,77 +705,88 @@ function TablesView({
   filteredRows,
 }) {
   const current = tables.find((table) => table.name === activeTable) || tables[0] || null;
-  const currentVisibleColumns = getVisibleColumns(current);
+  const currentRows = filteredRows.slice(0, 24);
+  const heroColumn = getPrimaryColumn(current);
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>数据表</CardTitle>
-        <CardDescription>
-          当前工作区：{workspaceId || "-"}。切换工作区时，这里会只显示该工作区自己的数据表。
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="mb-4 flex flex-wrap items-center gap-3">
-          <Button variant={showSystemTables ? "outline" : "default"} size="sm" onClick={() => onToggleVisibility(false)}>
-            业务表
-            <Badge variant="outline" className="ml-1">{businessCount}</Badge>
-          </Button>
-          <Button variant={showSystemTables ? "default" : "outline"} size="sm" onClick={() => onToggleVisibility(true)}>
-            系统表
-            <Badge variant="outline" className="ml-1">{systemCount}</Badge>
-          </Button>
-        </div>
-        {!tables.length ? <div className="text-sm text-stone-500">当前没有数据表。</div> : null}
-        {tables.length ? (
-          <Tabs value={current?.name} onValueChange={onActiveTableChange}>
-            <TabsList>
-              {tables.map((table) => (
-                <TabsTrigger key={table.name} value={table.name}>
-                  {table.title || table.name}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-
+    <div className="grid gap-4 xl:grid-cols-[260px_1fr]">
+      <Card>
+        <CardHeader>
+          <CardTitle>数据表</CardTitle>
+          <CardDescription>当前工作区：{workspaceId || "-"}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-4 flex gap-2">
+            <Button variant={showSystemTables ? "outline" : "default"} size="sm" onClick={() => onToggleVisibility(false)}>
+              业务表
+            </Button>
+            <Button variant={showSystemTables ? "default" : "outline"} size="sm" onClick={() => onToggleVisibility(true)}>
+              系统表
+            </Button>
+          </div>
+          <div className="space-y-2">
             {tables.map((table) => (
-              <TabsContent key={table.name} value={table.name}>
-                <div className="mb-4 flex items-center gap-3">
-                  <Badge variant="outline">{(table.rows || []).length} 行</Badge>
-                  <Badge variant="outline">{getVisibleColumns(table).length} 列</Badge>
-                  {getHiddenMetaColumns(table).length ? (
-                    <Badge variant="outline">隐藏 {getHiddenMetaColumns(table).length} 个系统字段</Badge>
-                  ) : null}
+              <button
+                key={table.name}
+                className={`w-full rounded-xl px-3 py-3 text-left transition ${current?.name === table.name ? "bg-teal-50" : "bg-stone-50 hover:bg-stone-100"}`}
+                onClick={() => onActiveTableChange(table.name)}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-medium text-stone-900">{table.title || table.name}</div>
+                  <Badge variant="outline">{(table.rows || []).length}</Badge>
                 </div>
-                <ScrollArea className="h-[640px] rounded-2xl bg-white">
-                  <table className="w-full border-collapse text-sm">
-                    <thead className="sticky top-0 bg-stone-100 text-stone-700">
-                      <tr>
-                        {getVisibleColumns(table).map((column) => (
-                          <th key={column} className="border-b border-stone-200 px-4 py-3 text-left font-medium">
-                            {formatColumnLabel(column)}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredRows.map((row, index) => (
-                        <tr key={`${table.name}-${index}`} className="odd:bg-white even:bg-stone-50">
-                          {getVisibleColumns(table).map((column) => (
-                            <td key={`${column}-${index}`} className="border-b border-stone-100 px-4 py-3 align-top">
-                              <div className="max-w-[320px] truncate">{stringifyValue(row[column])}</div>
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </ScrollArea>
-              </TabsContent>
+                <div className="mt-1 text-xs text-stone-500">{table.description || previewColumns(table.columns)}</div>
+              </button>
             ))}
-          </Tabs>
-        ) : null}
-      </CardContent>
-    </Card>
+            {!tables.length ? <div className="text-sm text-stone-500">当前没有数据表。</div> : null}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle>{current?.title || "未选择数据表"}</CardTitle>
+          <CardDescription>{current?.description || "更像内容库，而不是传统数据库表格。"}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {current ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">{(current.rows || []).length} 条记录</Badge>
+                <Badge variant="outline">{getVisibleColumns(current).length} 个展示字段</Badge>
+                {getHiddenMetaColumns(current).length ? <Badge variant="outline">隐藏 {getHiddenMetaColumns(current).length} 个系统字段</Badge> : null}
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {currentRows.map((row, index) => (
+                  <article key={`${current.name}-${index}`} className="rounded-xl bg-stone-50 p-4">
+                    <div className="text-base font-semibold text-stone-900">{stringifyValue(row[heroColumn] || row.title || row.name || row.id || "未命名")}</div>
+                    <div className="mt-3 space-y-2">
+                      {getVisibleColumns(current)
+                        .filter((column) => column !== heroColumn)
+                        .slice(0, 5)
+                        .map((column) => (
+                          <div key={`${current.name}-${index}-${column}`} className="grid grid-cols-[84px_1fr] gap-3 text-sm">
+                            <div className="text-stone-500">{formatColumnLabel(column)}</div>
+                            <div className="text-stone-800">{stringifyValue(row[column]) || "—"}</div>
+                          </div>
+                        ))}
+                    </div>
+                  </article>
+                ))}
+                {!currentRows.length ? <div className="text-sm text-stone-500">当前没有可展示的记录。</div> : null}
+              </div>
+
+              {(current.rows || []).length > currentRows.length ? (
+                <div className="text-sm text-stone-500">当前只展示前 {currentRows.length} 条记录，避免内容区过重。</div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="text-sm text-stone-500">未选择数据表。</div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -574,7 +815,7 @@ function OverviewView({
         <MetricCard label="异常任务" value={staleTasks} hint="中断、失败或阻塞的任务" />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+      <div className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
         <Card>
           <CardHeader>
             <CardTitle>工作区摘要</CardTitle>
@@ -598,7 +839,7 @@ function OverviewView({
           <CardContent className="space-y-3">
             {topTables.length ? (
               topTables.map((table) => (
-                <div key={table.name} className="rounded-2xl bg-white px-4 py-4 shadow-sm">
+                <div key={table.name} className="rounded-xl bg-stone-50 px-4 py-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="font-medium text-stone-900">{table.title || table.name}</div>
@@ -628,12 +869,13 @@ function OverviewView({
         <CardContent>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {trace.slice(0, 6).map((entry, index) => (
-              <div key={`${entry.timestamp}-${index}`} className="rounded-2xl bg-white px-4 py-4 shadow-sm">
+              <div key={`${entry.timestamp}-${index}`} className="rounded-xl bg-stone-50 px-4 py-4">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="font-medium text-stone-900">{entry.agent || entry.event || "事件"}</div>
-                  <Badge variant="outline">{entry.event || "轨迹"}</Badge>
+                  <div className="font-medium text-stone-900">{formatAgentLabel(entry.agent || "") || formatTraceEventLabel(entry.event)}</div>
+                  <Badge variant="outline">{formatTraceEventLabel(entry.event || "轨迹")}</Badge>
                 </div>
                 <div className="mt-2 text-xs text-stone-500">{entry.timestamp || "-"}</div>
+                <div className="mt-1 text-sm text-stone-700">{formatStepLabel(entry.action || entry.step || "")}</div>
               </div>
             ))}
             {!trace.length ? <div className="text-sm text-stone-500">暂无智能体轨迹。</div> : null}
@@ -713,7 +955,7 @@ function IngestPanel({
         </div>
 
         {ingestStatus ? (
-          <div className="mt-4 rounded-2xl bg-stone-50 p-4">
+          <div className="mt-4 rounded-xl bg-stone-50 p-4">
             <div className={`text-sm ${ingestStatus.ok ? "text-teal-700" : ingestStatus.loading ? "text-stone-500" : "text-rose-700"}`}>
               {ingestStatus.message}
             </div>
@@ -745,7 +987,7 @@ function IngestPanel({
           {recentSources.length ? (
             <div className="space-y-3">
               {recentSources.map((source, index) => (
-                <div key={`${source.source_id || "source"}-${index}`} className="rounded-2xl bg-white px-4 py-4 shadow-sm">
+                <div key={`${source.source_id || "source"}-${index}`} className="rounded-xl bg-stone-50 px-4 py-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium text-stone-900">{source.source_id || "未命名来源"}</span>
                     <Badge variant="outline">{source.source_type || "doc"}</Badge>
@@ -770,10 +1012,11 @@ function IngestPanel({
 
 function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
   const timeline = selectedTask?.stepTimeline || condenseStepEntries(selectedTask?.recentSteps || []);
+  const coreTimeline = summarizeCoreTimeline(timeline, selectedTask);
   const eventLog = selectedTask?.stepEntries || selectedTask?.recentSteps || [];
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+    <div className="grid gap-4 xl:grid-cols-[260px_1fr]">
       <Card>
         <CardHeader>
           <CardTitle>任务</CardTitle>
@@ -785,8 +1028,8 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
               tasks.map((task) => (
                 <button
                   key={task.task_id}
-                  className={`w-full rounded-2xl bg-white px-4 py-4 text-left shadow-sm transition ${
-                    task.task_id === selectedTaskId ? "ring-2 ring-teal-700" : ""
+                  className={`w-full rounded-xl px-4 py-4 text-left transition ${
+                    task.task_id === selectedTaskId ? "bg-teal-50" : "bg-stone-50 hover:bg-stone-100"
                   }`}
                   onClick={() => onSelectTask(task.task_id)}
                 >
@@ -794,7 +1037,9 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
                     <div className="truncate font-medium">{task.task_id}</div>
                     <StatusBadge task={task} />
                   </div>
-                  <div className="mt-2 text-sm text-stone-500">{mapTaskStatus(task.status)} · {task.current_step || "-"}</div>
+                  <div className="mt-2 text-sm text-stone-500">
+                    {mapTaskStatus(task.status)} · {formatStepLabel(task.current_step || "-")}
+                  </div>
                 </button>
               ))
             ) : (
@@ -807,24 +1052,30 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
       <Card>
         <CardHeader>
           <CardTitle>任务详情</CardTitle>
-          <CardDescription>查看当前步骤、最近事件与产物输出。</CardDescription>
+          <CardDescription>单页查看任务状态、影响、核心流程和产物。</CardDescription>
         </CardHeader>
         <CardContent>
           {selectedTask ? (
-            <div className="space-y-5">
-              <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-6">
+              <div className="rounded-xl bg-stone-50 p-5">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div className="text-xs uppercase tracking-[0.16em] text-stone-500">任务编号</div>
+                    <div className="mt-2 text-xl font-semibold text-stone-900">{selectedTask.task_id}</div>
+                    <div className="mt-2 text-sm text-stone-600">{selectedTask.resume_hint || "暂无任务说明"}</div>
+                  </div>
+                  <StatusBadge task={selectedTask} />
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <TaskMetric label="状态" value={mapTaskStatus(selectedTask.status)} task={selectedTask} />
-                <TaskMetric label="当前步骤" value={selectedTask.current_step || "-"} />
-                <TaskMetric label="当前智能体" value={selectedTask.current_agent || "未指定"} />
+                <TaskMetric label="当前步骤" value={formatStepLabel(selectedTask.current_step || "-")} />
+                <TaskMetric label="当前智能体" value={formatAgentLabel(selectedTask.current_agent || "未指定")} />
                 <TaskMetric label="最后心跳" value={formatTaskTime(selectedTask.last_heartbeat)} />
               </div>
 
-              <div className="rounded-2xl bg-stone-50 p-4">
-                <div className="text-sm font-medium text-stone-900">恢复提示</div>
-                <div className="mt-2 text-sm text-stone-600">{selectedTask.resume_hint || "暂无"}</div>
-              </div>
-
-              <div className="rounded-2xl bg-stone-50 p-4">
+              <div className="rounded-xl bg-stone-50 p-4">
                 <div className="text-sm font-medium text-stone-900">本次更新影响</div>
                 {selectedTask.impact?.source_count ? (
                   <div className="mt-3 space-y-3">
@@ -839,7 +1090,7 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
                     <div className="space-y-2">
                       {(selectedTask.impact.databases || []).length ? (
                         selectedTask.impact.databases.map((database) => (
-                          <div key={database.name} className="rounded-2xl bg-white px-4 py-3 shadow-sm">
+                          <div key={database.name} className="rounded-xl bg-stone-50 px-4 py-3">
                             <div className="font-medium text-stone-900">
                               {database.title} · {database.row_count} 条记录
                             </div>
@@ -858,20 +1109,18 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
                 )}
               </div>
 
-              <Separator />
-
               <div>
-                <div className="mb-3 text-sm font-medium text-stone-900">阶段时间线</div>
+                <div className="mb-3 text-sm font-medium text-stone-900">核心流程</div>
                 <div className="space-y-3">
-                  {timeline.length ? (
-                    timeline.map((step, index) => (
-                      <div key={`${step.timestamp || index}-${step.action || step.status}`} className="rounded-2xl bg-white px-4 py-4 shadow-sm">
+                  {coreTimeline.length ? (
+                    coreTimeline.map((step, index) => (
+                      <div key={`${step.timestamp || index}-${step.action || step.status}`} className="rounded-xl bg-stone-50 px-4 py-4">
                         <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div className="font-medium text-stone-900">{step.action || "-"}</div>
+                          <div className="font-medium text-stone-900">{step.label || formatStepLabel(step.action || "-")}</div>
                           <Badge variant={mapStepVariant(step.status)}>{mapStepStatus(step.status)}</Badge>
                         </div>
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                          <span>{step.agent || "系统步骤"}</span>
+                          <span>{step.agent_label || formatAgentLabel(step.agent || "系统步骤")}</span>
                           <span>·</span>
                           <span>
                             {step.started_at ? `开始：${formatTaskTime(step.started_at)}` : formatTaskTime(step.timestamp)}
@@ -902,66 +1151,69 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask }) {
                         {step.chunk_ids?.length ? (
                           <div className="mt-3 text-xs text-stone-500">Chunk：{step.chunk_ids.join(" / ")}</div>
                         ) : null}
+                        {step.actions?.length ? (
+                          <div className="mt-3 text-xs text-stone-500">
+                            包含步骤：{step.actions.map((name) => formatStepLabel(name)).join(" / ")}
+                          </div>
+                        ) : null}
                       </div>
                     ))
                   ) : (
-                    <div className="rounded-2xl bg-white px-4 py-4 text-sm text-stone-500 shadow-sm">暂无阶段时间线。</div>
+                    <div className="rounded-xl bg-stone-50 px-4 py-4 text-sm text-stone-500">暂无核心流程记录。</div>
                   )}
                 </div>
               </div>
 
-              <Separator />
-
-              <div>
-                <div className="mb-3 text-sm font-medium text-stone-900">原始事件流</div>
-                <ScrollArea className="h-[320px] rounded-2xl bg-white">
-                  <div className="space-y-3 p-4">
-                    {eventLog.length ? (
-                      eventLog.map((step, index) => (
-                        <div key={`${step.timestamp || index}-${step.action || step.status}-raw`} className="border-b border-stone-100 pb-3 last:border-b-0">
-                          <div className="flex flex-wrap items-center justify-between gap-3">
-                            <div className="font-medium text-stone-900">
-                              {step.action || "-"} · {mapStepStatus(step.status)}
-                            </div>
-                            <div className="text-xs text-stone-500">{formatTaskTime(step.timestamp)}</div>
-                          </div>
-                          <div className="mt-1 text-xs text-stone-500">{step.agent || "系统步骤"}</div>
-                          {step.resume_hint ? <div className="mt-2 text-sm text-stone-600">{step.resume_hint}</div> : null}
-                          {Object.keys(step).length ? (
-                            <pre className="mt-2 overflow-auto rounded-xl bg-stone-50 p-3 text-xs text-stone-700">
-                              {JSON.stringify(step, null, 2)}
-                            </pre>
-                          ) : null}
-                        </div>
-                      ))
-                    ) : (
-                      <div className="text-sm text-stone-500">暂无事件日志。</div>
-                    )}
-                  </div>
-                </ScrollArea>
-              </div>
-
-              <Separator />
-
               <div>
                 <div className="mb-3 text-sm font-medium text-stone-900">产物</div>
-                <div className="space-y-2">
+                <div className="grid gap-3 md:grid-cols-2">
                   {Object.entries(selectedTask.artifacts || {}).length ? (
                     Object.entries(selectedTask.artifacts || {}).map(([key, value]) => (
-                      <div key={key} className="rounded-2xl bg-white px-4 py-3 shadow-sm">
+                      <div key={key} className="rounded-xl bg-stone-50 px-4 py-3">
                         <div className="text-xs uppercase tracking-[0.16em] text-stone-500">{key}</div>
                         <div className="mt-1 break-all text-sm text-stone-700">{String(value)}</div>
                       </div>
                     ))
                   ) : (
-                    <div className="rounded-2xl bg-white px-4 py-4 text-sm text-stone-500 shadow-sm">暂无产物记录。</div>
+                    <div className="rounded-xl bg-stone-50 px-4 py-4 text-sm text-stone-500">暂无产物记录。</div>
                   )}
                 </div>
               </div>
 
-              <details className="rounded-2xl bg-stone-950 p-4 text-stone-100">
-                <summary className="cursor-pointer text-sm font-medium">查看完整 JSON</summary>
-                <pre className="mt-4 overflow-auto text-xs">{JSON.stringify(selectedTask, null, 2)}</pre>
+              <details className="rounded-xl bg-stone-50 p-4">
+                <summary className="cursor-pointer text-sm font-medium text-stone-900">高级日志</summary>
+                <div className="mt-4">
+                  <div className="mb-3 text-sm font-medium text-stone-900">原始事件流</div>
+                  <ScrollArea className="h-[320px] rounded-xl bg-white">
+                    <div className="space-y-3 p-4">
+                      {eventLog.length ? (
+                        eventLog.map((step, index) => (
+                          <div key={`${step.timestamp || index}-${step.action || step.status}-raw`} className="border-b border-stone-200 pb-3 last:border-b-0">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div className="font-medium text-stone-900">
+                                {formatStepLabel(step.action || "-")} · {mapStepStatus(step.status)}
+                              </div>
+                              <div className="text-xs text-stone-500">{formatTaskTime(step.timestamp)}</div>
+                            </div>
+                            <div className="mt-1 text-xs text-stone-500">{formatAgentLabel(step.agent || "系统步骤")}</div>
+                            {step.resume_hint ? <div className="mt-2 text-sm text-stone-600">{step.resume_hint}</div> : null}
+                            {Object.keys(step).length ? (
+                              <pre className="mt-2 overflow-auto rounded-lg bg-stone-50 p-3 text-xs text-stone-700">
+                                {JSON.stringify(step, null, 2)}
+                              </pre>
+                            ) : null}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-sm text-stone-500">暂无事件日志。</div>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+                <details className="mt-4 rounded-xl bg-stone-950 p-4 text-stone-100">
+                  <summary className="cursor-pointer text-sm font-medium">查看完整 JSON</summary>
+                  <pre className="mt-4 overflow-auto text-xs">{JSON.stringify(selectedTask, null, 2)}</pre>
+                </details>
               </details>
             </div>
           ) : (
@@ -989,11 +1241,11 @@ function AgentsView({
   onSave,
 }) {
   return (
-    <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+    <div className="grid gap-4 xl:grid-cols-[260px_1fr]">
       <Card>
         <CardHeader>
-          <CardTitle>智能体</CardTitle>
-          <CardDescription>默认只管理 4 个功能组。内部 agent 收到高级设置里，避免界面过度暴露实现细节。</CardDescription>
+          <CardTitle>功能组</CardTitle>
+          <CardDescription>这里只切换策略分组，不直接暴露底层流程。</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="space-y-3">
@@ -1001,8 +1253,8 @@ function AgentsView({
               agentGroups.map((group) => (
                 <button
                   key={group.id}
-                  className={`w-full rounded-2xl bg-white px-4 py-4 text-left shadow-sm transition ${
-                    group.id === selectedAgentGroupId ? "ring-2 ring-teal-700" : ""
+                  className={`w-full rounded-xl px-4 py-4 text-left transition ${
+                    group.id === selectedAgentGroupId ? "bg-teal-50" : "bg-stone-50 hover:bg-stone-100"
                   }`}
                   onClick={() => onSelectGroup(group.id)}
                 >
@@ -1022,55 +1274,60 @@ function AgentsView({
 
       <Card>
         <CardHeader>
-          <CardTitle>提示词编辑</CardTitle>
-          <CardDescription>先改功能组，再在需要时展开高级设置编辑组内 agent。</CardDescription>
+          <CardTitle>功能组设置</CardTitle>
+          <CardDescription>更像设置页，而不是逐个编辑器。只保留主智能体的运行配置和提示词。</CardDescription>
         </CardHeader>
         <CardContent>
           {selectedAgentGroup ? (
             <div className="space-y-4">
-              <div className="rounded-2xl bg-stone-50 p-4">
-                <div className="text-sm font-medium text-stone-900">{selectedAgentGroup.label}</div>
-                <div className="mt-2 text-sm text-stone-600">{selectedAgentGroup.description}</div>
-                <div className="mt-3 text-xs text-stone-500">
-                  当前这一组包含 {selectedAgentGroup.items.length} 个内部 agent。默认不必逐个调整，只有需要微调实现时再展开。
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-xl bg-stone-50 p-4">
+                  <div className="text-xs uppercase tracking-[0.16em] text-stone-500">功能组</div>
+                  <div className="mt-2 text-sm font-semibold text-stone-900">{selectedAgentGroup.label}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 p-4">
+                  <div className="text-xs uppercase tracking-[0.16em] text-stone-500">主智能体</div>
+                  <div className="mt-2 text-sm font-semibold text-stone-900">{formatAgentLabel(selectedAgentName)}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 p-4">
+                  <div className="text-xs uppercase tracking-[0.16em] text-stone-500">内部步骤数</div>
+                  <div className="mt-2 text-sm font-semibold text-stone-900">{selectedAgentGroup.items.length} 个</div>
                 </div>
               </div>
 
-              <details className="rounded-2xl bg-white p-4 shadow-sm">
-                <summary className="cursor-pointer text-sm font-medium text-stone-900">高级设置：组内 agent</summary>
-                <div className="mt-4">
-                  <Tabs value={selectedAgentName} onValueChange={onSelectAgent}>
-                    <TabsList>
-                      {selectedAgentGroup.items.map((agent) => (
-                        <TabsTrigger key={agent.name} value={agent.name}>
-                          {agent.name.replace("_agent", "")}
-                        </TabsTrigger>
-                      ))}
-                    </TabsList>
-                  </Tabs>
+              <div className="rounded-xl bg-stone-50 p-4 text-sm text-stone-600">{selectedAgentGroup.description}</div>
+
+              <div className="rounded-xl bg-stone-50 p-4">
+                <div className="text-xs uppercase tracking-[0.16em] text-stone-500">内部步骤</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {selectedAgentGroup.items.map((agent) => (
+                    <Badge key={agent.name} variant={agent.name === selectedAgentName ? "default" : "outline"}>
+                      {formatAgentLabel(agent.name)}
+                    </Badge>
+                  ))}
                 </div>
-              </details>
+              </div>
 
               {agentSpec ? (
                 <>
               <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded-2xl bg-stone-50 p-4">
-                  <div className="text-xs uppercase tracking-[0.16em] text-stone-500">配置文件</div>
+                <div className="rounded-xl bg-stone-50 p-4">
+                  <div className="text-xs uppercase tracking-[0.16em] text-stone-500">运行配置文件</div>
                   <div className="mt-2 break-all text-sm text-stone-700">{agentSpec.configPath}</div>
                 </div>
-                <div className="rounded-2xl bg-stone-50 p-4">
+                <div className="rounded-xl bg-stone-50 p-4">
                   <div className="text-xs uppercase tracking-[0.16em] text-stone-500">提示词文件</div>
                   <div className="mt-2 break-all text-sm text-stone-700">{agentSpec.promptPath || "未配置 prompt_template"}</div>
                 </div>
               </div>
 
               <div className="space-y-2">
-                <div className="text-sm font-medium text-stone-900">Agent YAML</div>
+                <div className="text-sm font-medium text-stone-900">运行配置</div>
                 <Textarea className="min-h-[260px] rounded-2xl font-mono text-xs" value={configInput} onChange={(event) => onConfigChange(event.target.value)} />
               </div>
 
               <div className="space-y-2">
-                <div className="text-sm font-medium text-stone-900">Prompt 模板</div>
+                <div className="text-sm font-medium text-stone-900">主提示词</div>
                 <Textarea className="min-h-[260px] rounded-2xl font-mono text-xs" value={promptInput} onChange={(event) => onPromptChange(event.target.value)} />
               </div>
 
@@ -1098,7 +1355,7 @@ function MetricCard({ label, value, hint }) {
   return (
     <Card>
       <CardContent className="space-y-2 p-5">
-        <div className="text-xs uppercase tracking-[0.18em] text-stone-500">{label}</div>
+      <div className="text-xs uppercase tracking-[0.18em] text-stone-500">{label}</div>
         <div className="text-3xl font-semibold text-stone-900">{value}</div>
         <div className="text-sm text-stone-500">{hint}</div>
       </CardContent>
@@ -1108,7 +1365,7 @@ function MetricCard({ label, value, hint }) {
 
 function TaskMetric({ label, value, task }) {
   return (
-    <div className="rounded-2xl bg-white px-4 py-4 shadow-sm">
+    <div className="rounded-xl bg-stone-50 px-4 py-4">
       <div className="text-xs uppercase tracking-[0.16em] text-stone-500">{label}</div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <div className="text-lg font-semibold text-stone-900">{value}</div>
@@ -1120,7 +1377,7 @@ function TaskMetric({ label, value, task }) {
 
 function SummaryRow({ label, value }) {
   return (
-    <div className="flex items-start justify-between gap-4 rounded-2xl bg-white px-4 py-3 shadow-sm">
+    <div className="flex items-start justify-between gap-4 rounded-xl bg-stone-50 px-4 py-3">
       <div className="text-sm text-stone-500">{label}</div>
       <div className="max-w-[60%] text-right text-sm font-medium text-stone-900">{value}</div>
     </div>
@@ -1166,6 +1423,21 @@ function mapStepStatus(status) {
     blocked: "阻塞",
   };
   return mapping[status] || status || "未知";
+}
+
+function formatAgentLabel(name) {
+  if (!name) return "";
+  return AGENT_LABELS[name] || name;
+}
+
+function formatStepLabel(name) {
+  if (!name) return "-";
+  return STEP_LABELS[name] || name;
+}
+
+function formatTraceEventLabel(name) {
+  if (!name) return "轨迹";
+  return TRACE_EVENT_LABELS[name] || name;
 }
 
 function mapStepVariant(status) {
@@ -1225,6 +1497,12 @@ function getHiddenMetaColumns(table) {
   const columns = table?.columns || [];
   if (table?.visibility === "system") return [];
   return columns.filter((column) => META_COLUMNS.has(column));
+}
+
+function getPrimaryColumn(table) {
+  const columns = getVisibleColumns(table);
+  const preferred = ["title", "name", "subject", "summary", "description"];
+  return preferred.find((column) => columns.includes(column)) || columns[0] || "id";
 }
 
 function formatColumnLabel(column) {
@@ -1291,4 +1569,54 @@ function condenseStepEntries(steps) {
     });
   }
   return condensed;
+}
+
+function summarizeCoreTimeline(steps, task) {
+  const phases = CORE_PHASES.map((phase) => ({ ...phase }));
+  return phases
+    .map((phase) => {
+      const items = (steps || []).filter((step) => phase.actions.includes(step.action));
+      if (!items.length) return null;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const outputs = Array.from(new Set(items.flatMap((item) => item.outputs || [])));
+      const chunkIds = Array.from(new Set(items.flatMap((item) => item.chunk_ids || [])));
+      const phaseStatus = deriveCorePhaseStatus(items, phase, task);
+      return {
+        action: phase.id,
+        label: phase.label,
+        status: phaseStatus,
+        started_at: first.started_at || first.timestamp,
+        completed_at: phaseStatus === "running" ? undefined : last.completed_at || last.timestamp,
+        timestamp: last.timestamp || first.timestamp,
+        agent: last.agent || first.agent,
+        agent_label: summarizePhaseAgents(items),
+        resume_hint: last.resume_hint || first.resume_hint,
+        outputs,
+        chunk_ids: chunkIds,
+        actions: items.map((item) => item.action).filter(Boolean),
+      };
+    })
+    .filter(Boolean);
+}
+
+function deriveCorePhaseStatus(items, phase, task) {
+  if (items.some((item) => item.status === "failed")) return "failed";
+  if (phase.id === "tables" && task?.status === "failed") return "failed";
+  if (items.some((item) => item.status === "blocked")) return "blocked";
+  if (items.some((item) => item.status === "fallback")) return "fallback";
+  if (items.some((item) => item.status === "running")) return "running";
+  return "ok";
+}
+
+function summarizePhaseAgents(items) {
+  const labels = Array.from(
+    new Set(
+      (items || [])
+        .map((item) => formatAgentLabel(item.agent))
+        .filter(Boolean)
+        .filter((label) => label !== "系统步骤"),
+    ),
+  );
+  return labels.length ? labels.join(" / ") : "系统步骤";
 }

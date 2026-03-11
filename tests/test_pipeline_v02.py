@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import shutil
 import unittest
+from datetime import datetime, timedelta
 
 from main import run_pipeline
 from mindvault.runtime.app import VaultRuntime, load_sources_from_path
@@ -203,15 +204,16 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(summary["recent_failures"], 1)
 
     def test_task_monitor_uses_recent_step_activity_for_running_task(self):
+        now = datetime.utcnow()
         task = {
             "status": "running",
-            "last_heartbeat": "2026-03-10T00:00:00",
+            "last_heartbeat": (now - timedelta(minutes=20)).isoformat(),
         }
         summary = summarize_task(
             task,
             recent_steps=[
-                {"status": "fallback", "timestamp": "2026-03-10T00:10:00"},
-                {"status": "ok", "timestamp": "2026-03-10T23:59:30"},
+                {"status": "fallback", "timestamp": (now - timedelta(minutes=10)).isoformat()},
+                {"status": "ok", "timestamp": (now - timedelta(seconds=30)).isoformat()},
             ],
         )
 

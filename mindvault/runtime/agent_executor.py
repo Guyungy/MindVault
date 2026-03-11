@@ -72,7 +72,16 @@ class AgentExecutor:
             output_keys=list(parsed.keys()) if isinstance(parsed, dict) else [],
         )
 
-        return parsed if isinstance(parsed, dict) else {"raw_content": content}
+        if isinstance(parsed, dict):
+            if "error" in result:
+                parsed["_agent_error"] = result.get("error", "")
+                parsed["_raw_content"] = content
+            return parsed
+
+        response: Dict[str, Any] = {"raw_content": content}
+        if "error" in result:
+            response["_agent_error"] = result.get("error", "")
+        return response
 
     @staticmethod
     def _build_prompt(template: str, context: Dict[str, Any]) -> str:
