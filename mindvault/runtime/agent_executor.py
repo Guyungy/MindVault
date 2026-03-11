@@ -52,9 +52,9 @@ class AgentExecutor:
             prompt_template = Path(prompt_path).read_text(encoding="utf-8")
 
         group_spec = self._group_spec_for_agent(agent_name)
-        soul_context = self._build_group_soul_context(agent_name)
+        guide_context = self._build_group_guide_context(group_spec)
         skill_context = self._build_skill_context(agent_name)
-        user_prompt = self._build_prompt(prompt_template, context, soul_context, skill_context)
+        user_prompt = self._build_prompt(prompt_template, context, guide_context, skill_context)
 
         client = self.router.client_for_task(model_route)
         if client is None:
@@ -94,7 +94,7 @@ class AgentExecutor:
         return response
 
     @staticmethod
-    def _build_prompt(template: str, context: Dict[str, Any], soul_context: str = "", skill_context: str = "") -> str:
+    def _build_prompt(template: str, context: Dict[str, Any], guide_context: str = "", skill_context: str = "") -> str:
         result = template
         for key, value in context.items():
             placeholder = "{{" + key + "}}"
@@ -103,8 +103,8 @@ class AgentExecutor:
                     result = result.replace(placeholder, json.dumps(value, ensure_ascii=False, indent=2))
                 else:
                     result = result.replace(placeholder, str(value))
-        if soul_context:
-            result = f"{result}\n\n[Group Soul]\n{soul_context}\n"
+        if guide_context:
+            result = f"{result}\n\n[Agent Workspace]\n{guide_context}\n"
         if skill_context:
             result = f"{result}\n\n[Enabled Skills]\n{skill_context}\n"
         return result
@@ -116,19 +116,35 @@ class AgentExecutor:
                 return group
         return {}
 
-    def _build_group_soul_context(self, agent_name: str) -> str:
-        group = self._group_spec_for_agent(agent_name)
+    def _build_group_guide_context(self, group: Dict[str, Any]) -> str:
         if not group:
             return ""
-        soul_path = group.get("soul_path", "")
-        if not soul_path:
+        sections: List[str] = []
+        for title, key in [
+            ("SOUL.md", "soul_path"),
+            ("AGENTS.md", "agents_path"),
+            ("TOOLS.md", "tools_path"),
+            ("HEARTBEAT.md", "heartbeat_path"),
+            ("MEMORY.md", "memory_path"),
+        ]:
+            relative_path = group.get(key, "")
+            if not relative_path:
+                continue
+            file_path = self._project_root / relative_path
+            if not file_path.exists():
+                continue
+            content = file_path.read_text(encoding="utf-8").strip()
+            if not content:
+                continue
+            sections.append(f"## {title}\n{content}")
+        if not sections:
             return ""
-        soul_file = self._project_root / soul_path
-        if not soul_file.exists():
-            return ""
-        content = soul_file.read_text(encoding="utf-8").strip()
         label = group.get("label", group.get("id", "group"))
-        return f"group: {label}\n{content}"
+        agent_dir = group.get("agent_dir", "")
+        header = [f"group: {label}"]
+        if agent_dir:
+            header.append(f"agent_dir: {agent_dir}")
+        return "\n".join(header) + "\n\n" + "\n\n".join(sections)
 
     def _enabled_skills_for_agent(self, agent_name: str) -> List[str]:
         bindings = self._read_json(self._agent_skill_bindings_path, {"agents": {}})

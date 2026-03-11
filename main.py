@@ -1,31 +1,31 @@
-"""Main entry point: workspace-aware multi-agent orchestration."""
+"""Compatibility entrypoint that forwards to the current runtime."""
 from __future__ import annotations
 
-import argparse
 import json
+from pathlib import Path
+from typing import Any, Dict
 
-from agent_runtime import MultiAgentRuntime
-from ingestor import IngestorAgent
-from workspace_manager import WorkspaceManager
-
-
-def build_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run self-growing KB pipeline with workspace isolation.")
-    parser.add_argument("--workspace", default="default", help="Workspace id for isolated KB/version/report state.")
-    parser.add_argument("--input", default="sample_data/raw_inputs.json", help="Path to raw ingestion JSON.")
-    parser.add_argument("--workflow", default="workflow/default_workflow.json", help="Editable task-routing workflow file.")
-    return parser.parse_args()
+from mindvault.runtime.app import VaultRuntime, load_sources_from_path, main
 
 
-def run_pipeline(workspace: str = "default", sample_path: str = "sample_data/raw_inputs.json", workflow: str = "workflow/default_workflow.json") -> dict:
-    workspace_ctx = WorkspaceManager().resolve(workspace)
-    raw_items = IngestorAgent().load_json(sample_path)
-    result = MultiAgentRuntime(workspace_ctx, workflow_path=workflow).run(raw_items)
+def run_pipeline(workspace: str = "default", sample_path: str = "sample_data/raw_inputs.json", workflow: str = "") -> Dict[str, Any]:
+    """Compatibility wrapper for legacy callers and tests."""
+    sources = load_sources_from_path(Path(sample_path))
+    runtime = VaultRuntime(workspace)
+    result = runtime.ingest(sources, profile="fast")
+
+    workspace_root = Path("output/workspaces") / workspace
+    extracted_dir = workspace_root / "extracted"
+    extracted_files = sorted(extracted_dir.glob("extracted_v*.json"))
+    if extracted_files:
+        latest = json.loads(extracted_files[-1].read_text(encoding="utf-8"))
+        claims_path = extracted_dir / "claims_v1.json"
+        claims_path.write_text(
+            json.dumps(latest.get("claims", []), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
     return result
 
 
 if __name__ == "__main__":
-    args = build_args()
-    output = run_pipeline(workspace=args.workspace, sample_path=args.input, workflow=args.workflow)
-    print("Pipeline completed.")
-    print(json.dumps(output, indent=2, ensure_ascii=False))
+    main()

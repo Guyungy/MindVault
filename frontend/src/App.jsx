@@ -128,6 +128,7 @@ const STEP_LABELS = {
   merge: "知识合并",
   governance: "治理审计",
   dashboard: "控制台渲染",
+  database_plan: "建库规划",
   multi_db: "数据表生成",
   wiki: "知识页生成",
   report: "报告生成",
@@ -146,8 +147,9 @@ const CORE_PHASES = [
   { id: "intake", label: "资料接收", actions: ["pipeline_start", "ingest", "adapt"] },
   { id: "parse", label: "知识解析", actions: ["parse"] },
   { id: "curate", label: "知识整理", actions: ["confidence", "schema", "curation", "merge", "governance", "versioning"] },
-  { id: "output", label: "内容生成", actions: ["insight", "report", "dashboard"] },
+  { id: "planning", label: "建库规划", actions: ["database_plan"] },
   { id: "tables", label: "数据表生成", actions: ["multi_db"] },
+  { id: "output", label: "内容生成", actions: ["insight", "report", "dashboard"] },
   { id: "wiki", label: "知识页生成", actions: ["wiki"] },
   { id: "pipeline", label: "任务收尾", actions: ["pipeline"] },
 ];
@@ -2401,7 +2403,7 @@ function SettingsView({
                   生成报告 JSON
                 </label>
                 <div className="mt-2 text-xs text-[var(--muted-foreground)]">
-                  当前引擎模式：{runtimeSettings?.execution?.engine_mode || "json_engine"}。控制台与知识页展示由 Node 前端负责，不再由 Python 主链路生成。
+                  当前引擎模式：{runtimeSettings?.execution?.engine_mode || "llm_only"}。主链路只依赖大模型返回结构化结果，控制台与知识页展示由 Node 前端负责。
                 </div>
               </div>
             </div>
@@ -2558,10 +2560,22 @@ function AgentsView({
                   <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">{selectedAgentGroup.label}</div>
                 </div>
                 <div className="border-b border-[var(--border)]/60 py-3">
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">智能体目录</div>
+                  <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">{agentGroupSpec?.agentDir || "-"}</div>
+                </div>
+                <div className="border-b border-[var(--border)]/60 py-3">
                   <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">Soul 文档</div>
                   <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">{agentGroupSpec?.soulPath || "-"}</div>
                 </div>
-                <div className="border-b border-[var(--border)]/60 py-3">
+                <div className="border-b border-[var(--border)]/60 py-3 md:col-span-3">
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">文档包</div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs text-[var(--muted-foreground)]">
+                    {Object.entries(agentGroupSpec?.guideFiles || {}).map(([key, value]) => (
+                      <Badge key={key} variant="outline">{String(value || key)}</Badge>
+                    ))}
+                  </div>
+                </div>
+                <div className="border-b border-[var(--border)]/60 py-3 md:col-span-3">
                   <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">运行方式</div>
                   <div className="mt-2 text-sm font-semibold text-[var(--foreground)]">单智能体入口</div>
                 </div>

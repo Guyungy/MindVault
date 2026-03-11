@@ -20,25 +20,25 @@ keeping user-facing agent roles stable.
 
 - Purpose: turn raw input into structured candidate knowledge
 - Owns: extraction, relation recognition, fallback parsing
-- Soul: `mindvault/souls/parsing/soul.md`
+- Agent dir: `mindvault/agents/parsing/`
 
 ### 治理智能体
 
 - Purpose: clean, reconcile, score, and stabilize knowledge
 - Owns: confidence scoring, schema stabilization, merge, conflict governance
-- Soul: `mindvault/souls/governance/soul.md`
+- Agent dir: `mindvault/agents/governance/`
 
 ### 建库智能体
 
 - Purpose: design useful tables and build the final multi-table result
 - Owns: ontology planning, multi-table projection
-- Soul: `mindvault/souls/modeling/soul.md`
+- Agent dir: `mindvault/agents/modeling/`
 
 ### 输出智能体
 
 - Purpose: generate optional summaries and reports without blocking core tables
 - Owns: insight/report output
-- Soul: `mindvault/souls/publishing/soul.md`
+- Agent dir: `mindvault/agents/publishing/`
 
 ## Runtime split
 
@@ -67,22 +67,23 @@ The system still has internal implementation steps, but they are not first-class
 user objects anymore. Users should not need to understand a chain of tiny
 sub-agents to operate the product.
 
-The UI therefore exposes only the four top-level agents, each with:
+The UI therefore exposes only the four top-level agents, each with one
+OpenClaw-style document bundle:
 
-- one `soul.md`
-- shared skills
-- one stable role in the system
+- `SOUL.md`
+- `AGENTS.md`
+- `TOOLS.md`
+- `HEARTBEAT.md`
+- `MEMORY.md`
+
+and shared skills plus one stable role in the system.
 
 ## Soul-driven behavior
 
-Each top-level agent has one soul document:
+Each top-level agent now has an agent workspace directory under `mindvault/agents/`.
 
-- `mindvault/souls/parsing/soul.md`
-- `mindvault/souls/governance/soul.md`
-- `mindvault/souls/modeling/soul.md`
-- `mindvault/souls/publishing/soul.md`
-
-At runtime, internal implementation calls inherit the soul content of their
+At runtime, internal implementation calls inherit the full guide bundle
+(`SOUL.md`, `AGENTS.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`) of their
 top-level agent group through `AgentExecutor`.
 
 This keeps editing simple while preserving implementation flexibility.

@@ -231,6 +231,75 @@ class RuntimeResilienceTests(unittest.TestCase):
         self.assertIn("Demo Skill", captured["prompt"])
         self.assertIn("Always extract more structure.", captured["prompt"])
 
+    def test_agent_executor_injects_group_guide_context(self):
+        fake_client = _FakeClient()
+        executor = AgentExecutor(_FakeRouter(fake_client), TraceLogger())
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            (td_path / "config").mkdir()
+            (td_path / "mindvault" / "agents" / "parsing").mkdir(parents=True)
+
+            (td_path / "config" / "agent_groups.json").write_text(
+                json.dumps(
+                    {
+                        "groups": [
+                            {
+                                "id": "parsing",
+                                "label": "解析智能体",
+                                "agent_dir": "mindvault/agents/parsing",
+                                "soul_path": "mindvault/agents/parsing/SOUL.md",
+                                "agents_path": "mindvault/agents/parsing/AGENTS.md",
+                                "tools_path": "mindvault/agents/parsing/TOOLS.md",
+                                "heartbeat_path": "mindvault/agents/parsing/HEARTBEAT.md",
+                                "memory_path": "mindvault/agents/parsing/MEMORY.md",
+                                "internal_agents": ["parse_agent"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for filename, content in {
+                "SOUL.md": "严格抽取，不要制造噪声实体。",
+                "AGENTS.md": "用户只看解析智能体，不看内部成员。",
+                "TOOLS.md": "输出必须是 JSON。",
+                "HEARTBEAT.md": "优先正确，再考虑丰富。",
+                "MEMORY.md": "长期偏好：中文字段。",
+            }.items():
+                (td_path / "mindvault" / "agents" / "parsing" / filename).write_text(content, encoding="utf-8")
+
+            prompt_file = td_path / "prompt.md"
+            prompt_file.write_text("{{chunk_text}}", encoding="utf-8")
+            agent_file = td_path / "agent.yaml"
+            agent_file.write_text(
+                "\n".join(
+                    [
+                        "name: parse_agent",
+                        "model_route: parse",
+                        f"prompt_template: {prompt_file}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            executor._project_root = td_path
+            executor._agent_groups_path = td_path / "config" / "agent_groups.json"
+
+            captured = {}
+
+            def _chat(prompt, system_prompt="", max_retries=None, **kwargs):
+                captured["prompt"] = prompt
+                return {"content": '{"claims": [], "entity_candidates": []}'}
+
+            fake_client.chat = _chat
+            executor.execute(agent_file, {"chunk_text": "hello"})
+
+        self.assertIn("[Agent Workspace]", captured["prompt"])
+        self.assertIn("## SOUL.md", captured["prompt"])
+        self.assertIn("## AGENTS.md", captured["prompt"])
+        self.assertIn("长期偏好：中文字段。", captured["prompt"])
+
     def test_database_agents_use_multi_db_route(self):
         executor = AgentExecutor(_FakeRouter(_FakeClient()), TraceLogger())
         database_builder = executor.load_agent("mindvault/agents/database_builder_agent.yaml")

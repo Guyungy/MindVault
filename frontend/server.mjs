@@ -323,8 +323,16 @@ async function readAgentGroupSpec(groupId) {
     id: group.id,
     label: group.label,
     description: group.description,
+    agentDir: group.agent_dir || "",
     soulPath: group.soul_path || "",
     soulContent,
+    guideFiles: {
+      soul: group.soul_path || "",
+      agents: group.agents_path || "",
+      tools: group.tools_path || "",
+      heartbeat: group.heartbeat_path || "",
+      memory: group.memory_path || "",
+    },
     enabledSkills: firstAgent ? bindings.agents?.[firstAgent] || [] : [],
   };
 }
@@ -399,13 +407,13 @@ async function handleModelConfigUpdate(req, res) {
 
 async function readRuntimeConfig() {
   const config = await readJsonSafe(runtimeConfigPath, {
-    execution: { profile: "fast", engine_mode: "json_engine" },
+    execution: { profile: "fast", engine_mode: "llm_only" },
     artifacts: { report: false },
   });
   return {
     execution: {
       profile: ["fast", "full"].includes(config?.execution?.profile) ? config.execution.profile : "fast",
-      engine_mode: config?.execution?.engine_mode || "json_engine",
+      engine_mode: "llm_only",
     },
     artifacts: {
       report: Boolean(config?.artifacts?.report),
@@ -420,7 +428,7 @@ async function handleRuntimeConfigUpdate(req, res) {
     const next = {
       execution: {
         profile: ["fast", "full"].includes(body?.execution?.profile) ? body.execution.profile : current.execution.profile,
-        engine_mode: "json_engine",
+        engine_mode: "llm_only",
       },
       artifacts: {
         report: typeof body?.artifacts?.report === "boolean" ? body.artifacts.report : current.artifacts.report,
@@ -484,6 +492,19 @@ async function handleAgentGroupUpdate(req, res, groupId) {
     if (typeof body.soulContent === "string" && soulPath) {
       await mkdir(path.dirname(soulPath), { recursive: true });
       await writeFile(soulPath, body.soulContent, "utf-8");
+    }
+    for (const [contentKey, pathKey] of [
+      ["agentsContent", "agents_path"],
+      ["toolsContent", "tools_path"],
+      ["heartbeatContent", "heartbeat_path"],
+      ["memoryContent", "memory_path"],
+    ]) {
+      const nextContent = body?.[contentKey];
+      const nextPath = path.join(rootDir, group[pathKey] || "");
+      if (typeof nextContent === "string" && group[pathKey]) {
+        await mkdir(path.dirname(nextPath), { recursive: true });
+        await writeFile(nextPath, nextContent, "utf-8");
+      }
     }
     if (Array.isArray(body.enabledSkills)) {
       const bindings = await readAgentSkillBindings();

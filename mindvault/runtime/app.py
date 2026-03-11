@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,16 +23,15 @@ from mindvault.governance.placeholder_engine import PlaceholderEngine
 from mindvault.governance.schema_evolution import SchemaEvolutionEngine
 from mindvault.governance.memory_curator import MemoryCurator
 from mindvault.runtime.renderers.multi_db import MultiDBRenderer
-from parser import ParserAgent as RuleParserAgent
 
 
 class VaultRuntime:
     """
-    The MindVault runtime: orchestrates the full knowledge pipeline.
+    Thin LLM-first runtime.
 
-    source → adapt → parse(LLM) → claim_resolve → dedup → relation
-      → governance(confidence + conflict + placeholder + schema)
-      → merge canonical → version snapshot → insight(optional) → report(optional)
+    The runtime should only orchestrate task state, artifact persistence,
+    structured-output validation, and model execution. Knowledge interpretation,
+    table semantics, and explanation strategy belong to the four main agents.
     """
 
     def __init__(self, workspace_id: str, config_root: str = "mindvault/config", verbose: bool = False) -> None:
@@ -68,7 +66,6 @@ class VaultRuntime:
             policy_path=str(config_root_path / "schema_policy.json"),
         )
         self.memory_curator = MemoryCurator(min_confidence=0.3)
-        self.rule_parser = RuleParserAgent()
 
         # Adapters registry
         self._adapters = {
@@ -140,19 +137,7 @@ class VaultRuntime:
                     all_relations.extend(normalized.get("relation_candidates", []))
                     all_events.extend(normalized.get("event_candidates", []))
                 else:
-                    fallback = self._fallback_parse_chunk(chunk)
-                    all_claims.extend(fallback.get("claims", []))
-                    all_entities.extend(fallback.get("entity_candidates", []))
-                    all_relations.extend(fallback.get("relation_candidates", []))
-                    all_events.extend(fallback.get("event_candidates", []))
-                    self.trace.log(
-                        "parse_fallback",
-                        chunk_id=chunk.chunk_id,
-                        reason="no_structured_output",
-                        fallback_claims=len(fallback.get("claims", [])),
-                        fallback_entities=len(fallback.get("entity_candidates", [])),
-                    )
-                    task.log_step("parse_chunk", "fallback", chunk_id=chunk.chunk_id)
+                    raise RuntimeError(f"parse_agent returned no structured output for chunk {chunk.chunk_id}")
 
             self.trace.log("parse_complete",
                            claims=len(all_claims), entities=len(all_entities),
@@ -228,14 +213,19 @@ class VaultRuntime:
 
             if profile == "full" and report_enabled:
                 self._mark_task(task, "insight", agent="insight_generator", resume_hint="Generating insight summaries.")
-                insights = self._generate_insights(state)
+                insights = self._generate_insights(state, governance)
                 self.kb.append_insights(insights)
                 state = self.kb.state
                 self.trace.log("insight_complete", count=len(insights))
                 task.log_step("insight", "ok", count=len(insights))
 
-            self._mark_task(task, "multi_db", agent="database_builder_agent", resume_hint="Building database plan and multi-db outputs.")
+            self._mark_task(task, "database_plan", agent="ontology_agent", resume_hint="Planning business tables and relationships.")
             database_plan = self._generate_database_plan(state, governance)
+            database_plan_path = self._write_database_plan(database_plan)
+            task.add_artifact("database_plan", str(database_plan_path))
+            task.log_step("database_plan", "ok", databases=len(database_plan.get("databases", [])), output=str(database_plan_path))
+
+            self._mark_task(task, "multi_db", agent="database_builder_agent", resume_hint="Building structured tables from the approved plan.")
             multi_db = self._generate_multi_db(state, database_plan)
             multi_db_paths = self._export_multi_db(database_plan, multi_db)
             self.trace.log("multi_db_export_complete", data=multi_db_paths.get("data", ""))
@@ -290,15 +280,19 @@ class VaultRuntime:
                 },
             }
         except Exception as exc:
+            current_step = task.state.get("current_step", "")
+            current_agent = task.state.get("current_agent", "")
+            if current_step and current_step != "pipeline":
+                task.log_step(current_step, "failed", agent=current_agent, error=str(exc))
             task.log_step("pipeline", "failed", error=str(exc))
-            task.fail(str(exc), step=task.state.get("current_step", ""))
+            task.fail(str(exc), step=current_step)
             self.trace.log("pipeline_failed", error=str(exc), task_id=task.task_id)
             self.trace.save(self.ctx.root_dir / "agent_trace.json")
             raise
 
     def _load_runtime_settings(self) -> Dict[str, Any]:
         fallback = {
-            "execution": {"profile": "fast", "engine_mode": "json_engine"},
+            "execution": {"profile": "fast", "engine_mode": "llm_only"},
             "artifacts": {"report": False},
         }
         if not self.runtime_config_path.exists():
@@ -315,7 +309,7 @@ class VaultRuntime:
         return {
             "execution": {
                 "profile": profile,
-                "engine_mode": "json_engine",
+                "engine_mode": "llm_only",
             },
             "artifacts": {
                 "report": bool(artifacts.get("report", False)),
@@ -325,12 +319,20 @@ class VaultRuntime:
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     def _detect_source_type(self, source: Dict[str, Any]) -> str:
-        st = source.get("source_type", "")
+        st = str(source.get("source_type", "")).strip().lower()
         if st and st != "doc":
             return st
-        content = source.get("content", "")
-        note = json.dumps(source.get("context_hints", {}), ensure_ascii=False)
-        if self._looks_like_chat(content) or "聊天" in note or "个人数据库" in note or "个人信息数据库" in note:
+        hints = source.get("context_hints", {}) or {}
+        metadata = source.get("metadata", {}) or {}
+        hint_text = " ".join(
+            [
+                str(hints.get("source_type", "")),
+                str(hints.get("note", "")),
+                str(metadata.get("filename", "")),
+                str(metadata.get("origin", "")),
+            ]
+        ).lower()
+        if any(token in hint_text for token in ["chat", "conversation", "message", "messages", "聊天", "对话"]):
             return "chat"
         return "doc"
 
@@ -347,72 +349,56 @@ class VaultRuntime:
         }, indent=2, ensure_ascii=False), encoding="utf-8")
         return path
 
-    def _generate_insights(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Try LLM insight, fall back to template."""
-        from collections import Counter
-        entities = state.get("entities", [])
-        events = state.get("events", [])
-        relations = state.get("relations", [])
-
-        type_counts = Counter(e.get("type", "unknown") for e in entities)
-        most_active = max(type_counts.items(), key=lambda x: x[1])[0] if type_counts else "N/A"
-        missing_ph = sum(1 for p in state.get("placeholders", []) if isinstance(p, dict) and p.get("status") == "missing")
-
-        return [
-            {
-                "insight_id": f"insight_growth_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-                "title": "知识库增长概览",
-                "summary": f"当前知识库包含 {len(entities)} 个实体、{len(events)} 个事件、{len(relations)} 条关系。",
-                "metrics": {"entity_type_distribution": dict(type_counts), "missing_placeholders": missing_ph},
-                "generated_at": datetime.utcnow().isoformat(),
-            },
-            {
-                "insight_id": f"insight_recommend_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-                "title": "治理建议",
-                "summary": f"建议优先补充 '{most_active}' 类型记录中缺失的联系方式和位置信息。",
-                "metrics": {"dominant_type": most_active},
-                "generated_at": datetime.utcnow().isoformat(),
-            },
-        ]
+    def _generate_insights(self, state: Dict[str, Any], governance: Dict[str, Any]) -> List[Dict[str, Any]]:
+        insight_agent_path = Path("mindvault/agents/insight_agent.yaml")
+        if not insight_agent_path.exists():
+            raise RuntimeError("insight_agent definition not found")
+        context = {
+            "entities": state.get("entities", []),
+            "claims": state.get("claims", []),
+            "relations": state.get("relations", []),
+            "events": state.get("events", []),
+            "governance": governance,
+        }
+        result = self.executor.execute(insight_agent_path, context)
+        self._raise_on_agent_error(result, "insight_agent")
+        if isinstance(result, dict) and isinstance(result.get("insights"), list):
+            return result["insights"]
+        if isinstance(result, dict) and isinstance(result.get("items"), list):
+            return result["items"]
+        raise RuntimeError("insight_agent returned no structured insights output")
 
     def _generate_report(self, state, insights, governance) -> Dict[str, Any]:
         report_agent_path = Path("mindvault/agents/report_agent.yaml")
-        if report_agent_path.exists():
-            context = {
-                "entities": state.get("entities", []),
-                "claims": state.get("claims", []),
-                "relations": state.get("relations", [])
-            }
-            result = self.executor.execute(report_agent_path, context)
-            self._raise_on_agent_error(result, "report_agent")
-            if isinstance(result, dict) and "business_domain" in result:
-                return result
-            elif isinstance(result, dict) and result.get("content") and isinstance(result["content"], dict):
-                return result["content"]
-
-        # Fallback to simple dictionary
-        return {
-            "business_domain": "System Fallback Overview",
-            "summary": "Report generation failed or returned unparseable text.",
-            "tags": ["fallback", "system", "auto-generated"],
-            "tables": [
-                {
-                    "table_name": "Knowledge Elements",
-                    "columns": ["Type", "Count"],
-                    "rows": [
-                        {"Type": "Entities", "Count": len(state.get('entities', []))},
-                        {"Type": "Events", "Count": len(state.get('events', []))},
-                        {"Type": "Relations", "Count": len(state.get('relations', []))},
-                        {"Type": "Claims", "Count": len(state.get('claims', []))}
-                    ]
-                }
-            ]
+        if not report_agent_path.exists():
+            raise RuntimeError("report_agent definition not found")
+        context = {
+            "entities": state.get("entities", []),
+            "claims": state.get("claims", []),
+            "relations": state.get("relations", []),
+            "events": state.get("events", []),
+            "insights": insights,
+            "governance": governance,
         }
+        result = self.executor.execute(report_agent_path, context)
+        self._raise_on_agent_error(result, "report_agent")
+        if isinstance(result, dict) and "business_domain" in result:
+            return result
+        if isinstance(result, dict) and result.get("content") and isinstance(result["content"], dict):
+            return result["content"]
+        raise RuntimeError("report_agent returned no structured report output")
 
     def _write_report(self, state, insights, governance) -> str:
         report_data = self._generate_report(state, insights, governance)
         self.ctx.report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
         return str(self.ctx.report_path)
+
+    def _write_database_plan(self, database_plan: Dict[str, Any]) -> Path:
+        out_dir = self.ctx.root_dir / "multi_db"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / "database_plan.json"
+        path.write_text(json.dumps(database_plan, indent=2, ensure_ascii=False), encoding="utf-8")
+        return path
 
     def _export_multi_db(self, database_plan: Dict[str, Any], multi_db: Dict[str, Any]) -> Dict[str, str]:
         renderer = MultiDBRenderer(self.ctx.root_dir / "multi_db")
@@ -420,60 +406,163 @@ class VaultRuntime:
 
     def _generate_database_plan(self, state, governance) -> Dict[str, Any]:
         ontology_agent_path = Path("mindvault/agents/ontology_agent.yaml")
-        if ontology_agent_path.exists():
-            context = {
-                "entities": state.get("entities", []),
-                "claims": state.get("claims", []),
-                "relations": state.get("relations", []),
-                "events": state.get("events", []),
-                "governance": governance,
-            }
-            try:
-                result = self.executor.execute(ontology_agent_path, context)
-                self._raise_on_agent_error(result, "ontology_agent")
-                if isinstance(result, dict) and isinstance(result.get("databases"), list):
-                    return self._finalize_database_plan(result)
-            except Exception as exc:
-                self.trace.log("database_plan_fallback", agent="ontology_agent", error=str(exc))
-        return self._finalize_database_plan(self._fallback_database_plan(state))
+        if not ontology_agent_path.exists():
+            raise RuntimeError("ontology_agent definition not found")
+        context = self._build_modeling_context(state, governance)
+        result = self.executor.execute(ontology_agent_path, context)
+        self._raise_on_agent_error(result, "ontology_agent")
+        if isinstance(result, dict) and isinstance(result.get("databases"), list):
+            return self._finalize_database_plan(result)
+        raise RuntimeError("ontology_agent returned no structured database plan")
 
     def _generate_multi_db(self, state, database_plan: Dict[str, Any]) -> Dict[str, Any]:
         database_builder_agent_path = Path("mindvault/agents/database_builder_agent.yaml")
-        if database_builder_agent_path.exists():
-            context = {
-                "database_plan": database_plan,
-                "entities": state.get("entities", []),
-                "claims": state.get("claims", []),
-                "relations": state.get("relations", []),
-                "events": state.get("events", []),
+        if not database_builder_agent_path.exists():
+            raise RuntimeError("database_builder_agent definition not found")
+        modeling_context = self._build_modeling_context(state)
+        built_databases: List[Dict[str, Any]] = []
+
+        for database_spec in database_plan.get("databases", []):
+            single_plan = {
+                "domain": database_plan.get("domain", ""),
+                "generated_at": database_plan.get("generated_at", ""),
+                "databases": [database_spec],
+                "relations": [
+                    relation
+                    for relation in database_plan.get("relations", [])
+                    if relation.get("from_db") == database_spec.get("name") or relation.get("to_db") == database_spec.get("name")
+                ],
             }
-            try:
-                result = self.executor.execute(database_builder_agent_path, context)
-                self._raise_on_agent_error(result, "database_builder_agent")
-                if isinstance(result, dict) and isinstance(result.get("databases"), list):
-                    return self._finalize_multi_db(result, database_plan)
-            except Exception as exc:
-                self.trace.log("multi_db_fallback", agent="database_builder_agent", error=str(exc))
-        return self._finalize_multi_db(self._fallback_multi_db(state, database_plan), database_plan)
+            context = {
+                "database_plan": single_plan,
+                **modeling_context,
+            }
+            result = self.executor.execute(database_builder_agent_path, context)
+            self._raise_on_agent_error(result, "database_builder_agent")
+            if not isinstance(result, dict) or not isinstance(result.get("databases"), list):
+                raise RuntimeError(
+                    f"database_builder_agent returned no structured table output for '{database_spec.get('name', '')}'"
+                )
+            built_databases.extend(result.get("databases", []))
 
-    def _generate_wiki_payload(self, state, governance, version_meta) -> Dict[str, Any] | None:
-        wiki_agent_path = Path("mindvault/agents/wiki_builder_agent.yaml")
-        if not wiki_agent_path.exists():
-            return None
-
-        context = {
-            "entities": state.get("entities", []),
-            "claims": state.get("claims", []),
-            "relations": state.get("relations", []),
-            "events": state.get("events", []),
-            "governance": governance,
-            "version_meta": version_meta,
+        merged_payload = {
+            "domain": database_plan.get("domain", ""),
+            "generated_at": datetime.utcnow().isoformat(),
+            "databases": built_databases,
+            "relations": database_plan.get("relations", []),
         }
-        result = self.executor.execute(wiki_agent_path, context)
-        self._raise_on_agent_error(result, "wiki_builder_agent")
-        if isinstance(result, dict) and isinstance(result.get("pages"), list):
-            return result
-        return None
+        return self._finalize_multi_db(merged_payload, database_plan)
+
+    def _build_modeling_context(self, state: Dict[str, Any], governance: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return {
+            "entities": [self._compact_entity_for_modeling(item) for item in state.get("entities", [])],
+            "claims": [self._compact_claim_for_modeling(item) for item in state.get("claims", [])],
+            "relations": [self._compact_relation_for_modeling(item) for item in state.get("relations", [])],
+            "events": [self._compact_event_for_modeling(item) for item in state.get("events", [])],
+            "governance": self._compact_governance_for_modeling(governance or {}),
+        }
+
+    @staticmethod
+    def _compact_entity_for_modeling(entity: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": entity.get("id", ""),
+            "name": entity.get("name", ""),
+            "type": entity.get("type", ""),
+            "attributes": VaultRuntime._compact_mapping(entity.get("attributes", {})),
+            "source_refs": list((entity.get("source_refs") or [])[:5]),
+            "confidence": entity.get("confidence"),
+            "status": entity.get("status", ""),
+        }
+
+    @staticmethod
+    def _compact_claim_for_modeling(claim: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": claim.get("id", claim.get("claim_id", "")),
+            "subject": claim.get("subject", ""),
+            "predicate": claim.get("predicate", ""),
+            "object": VaultRuntime._compact_scalar(claim.get("object")),
+            "claim_type": claim.get("claim_type", ""),
+            "confidence": claim.get("confidence"),
+            "source_ref": claim.get("source_ref", ""),
+        }
+
+    @staticmethod
+    def _compact_relation_for_modeling(relation: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "source": relation.get("source", relation.get("source_entity", "")),
+            "relation": relation.get("relation", relation.get("relation_type", "")),
+            "target": relation.get("target", relation.get("target_entity", "")),
+            "confidence": relation.get("confidence"),
+        }
+
+    @staticmethod
+    def _compact_event_for_modeling(event: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": event.get("id", event.get("event_id", "")),
+            "type": event.get("type", ""),
+            "description": VaultRuntime._compact_text(event.get("description", "")),
+            "entities": list((event.get("entities") or event.get("participants") or [])[:6]),
+            "timestamp": event.get("timestamp"),
+            "status": event.get("status", ""),
+        }
+
+    @staticmethod
+    def _compact_governance_for_modeling(governance: Dict[str, Any]) -> Dict[str, Any]:
+        conflicts = ((governance or {}).get("conflicts") or {}).get("conflicts", [])
+        placeholders = (governance or {}).get("placeholders", [])
+        schema_candidates = (governance or {}).get("schema_candidates", {})
+        return {
+            "conflict_count": len(conflicts),
+            "placeholder_count": len(placeholders),
+            "conflict_samples": [
+                {
+                    "field": item.get("field", ""),
+                    "entity_id": item.get("entity_id", ""),
+                }
+                for item in conflicts[:5]
+            ],
+            "placeholder_samples": [
+                {
+                    "entity_id": item.get("entity_id", ""),
+                    "field": item.get("field", ""),
+                    "status": item.get("status", ""),
+                }
+                for item in placeholders[:8]
+            ],
+            "schema_candidates": VaultRuntime._compact_mapping(schema_candidates),
+        }
+
+    @staticmethod
+    def _compact_mapping(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        compacted: Dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                compacted[key] = VaultRuntime._compact_scalar(item)
+            else:
+                compacted[key] = VaultRuntime._compact_scalar(item)
+        return compacted
+
+    @staticmethod
+    def _compact_scalar(value: Any) -> Any:
+        if isinstance(value, str):
+            return VaultRuntime._compact_text(value)
+        if isinstance(value, list):
+            return [VaultRuntime._compact_scalar(item) for item in value[:6]]
+        if isinstance(value, dict):
+            return {
+                key: VaultRuntime._compact_scalar(item)
+                for key, item in list(value.items())[:8]
+            }
+        return value
+
+    @staticmethod
+    def _compact_text(value: str, limit: int = 180) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit].rstrip()}..."
 
     @staticmethod
     def _raise_on_agent_error(result: Dict[str, Any] | Any, agent_name: str) -> None:
@@ -516,91 +605,23 @@ class VaultRuntime:
             task.heartbeat(step=step, agent=agent, resume_hint=f"{step} failed: {error_text}")
             return None
 
-    def _fallback_database_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        entity_types = sorted({entity.get("type", "unknown") for entity in state.get("entities", [])})
-        databases = []
-        if entity_types:
-            for entity_type in entity_types:
-                fields = {"id", "name", "type", "confidence", "source_refs"}
-                for entity in state.get("entities", []):
-                    if entity.get("type") == entity_type:
-                        fields.update(entity.get("attributes", {}).keys())
-                databases.append({
-                    "name": f"{entity_type}s",
-                    "title": entity_type,
-                    "description": f"Stores {entity_type} entities.",
-                    "entity_types": [entity_type],
-                    "suggested_fields": list(fields),
-                    "visibility": "business",
-                })
-        for name, title, desc in [
-            ("claims", "claims", "Atomic statements extracted from sources."),
-            ("relations", "relations", "Cross-record links."),
-            ("sources", "sources", "Source references and provenance."),
-        ]:
-            databases.append({
-                "name": name,
-                "title": title,
-                "description": desc,
-                "entity_types": [],
-                "suggested_fields": ["id"],
-                "visibility": "system",
-            })
-        return {
-            "domain": "MindVault Multi-DB",
-            "generated_at": datetime.utcnow().isoformat(),
-            "databases": databases,
-            "relations": self._fallback_relation_defs(state, databases),
-        }
-
-    def _fallback_multi_db(self, state: Dict[str, Any], database_plan: Dict[str, Any]) -> Dict[str, Any]:
-        databases: List[Dict[str, Any]] = []
-        entities = state.get("entities", [])
-
-        for database in database_plan.get("databases", []):
-            name = database.get("name", "")
-            entity_types = set(database.get("entity_types", []))
-            if name == "claims":
-                rows = [self._flatten_claim_row(claim) for claim in state.get("claims", [])]
-            elif name == "relations":
-                rows = [self._flatten_relation_row(relation) for relation in state.get("relations", [])]
-            elif name == "sources":
-                rows = self._build_source_rows(state)
-            else:
-                rows = [
-                    self._flatten_entity_row(entity)
-                    for entity in entities
-                    if not entity_types or entity.get("type") in entity_types
-                ]
-            rows = [self._normalize_row_shape(item) for item in rows]
-            columns = self._collect_columns(rows)
-            databases.append({
-                "name": name,
-                "title": database.get("title", name),
-                "description": database.get("description", ""),
-                "visibility": database.get("visibility", self._infer_database_visibility(name)),
-                "primary_key": self._infer_primary_key(columns),
-                "columns": columns,
-                "rows": rows,
-            })
-
-        return {
-            "domain": database_plan.get("domain", "MindVault Multi-DB"),
-            "generated_at": datetime.utcnow().isoformat(),
-            "databases": databases,
-            "relations": self._merge_relation_defs(
-                self._fallback_relation_defs(state, database_plan.get("databases", [])),
-                self._infer_relations_from_multi_db(databases),
-            ),
-        }
-
     def _finalize_database_plan(self, database_plan: Dict[str, Any]) -> Dict[str, Any]:
         plan = dict(database_plan)
         normalized = []
         for database in plan.get("databases", []):
             row = dict(database)
             name = row.get("name", "")
+            entity_types = [item for item in row.get("entity_types", []) if item]
             row.setdefault("visibility", self._infer_database_visibility(name))
+            if name in {"claims", "relations", "sources"}:
+                row.setdefault("row_source", name)
+                row.setdefault("record_granularity", name[:-1] if name.endswith("s") else name)
+            elif entity_types and len(entity_types) == 1:
+                row.setdefault("row_source", "entities")
+                row.setdefault("record_granularity", "entity")
+            else:
+                row.setdefault("row_source", "mixed")
+                row.setdefault("record_granularity", "mixed")
             normalized.append(row)
         plan["databases"] = normalized
         return plan
@@ -622,110 +643,98 @@ class VaultRuntime:
             row["columns"] = inferred_columns + planned_fields
             row.setdefault("primary_key", self._infer_primary_key(row["columns"]))
             normalized.append(row)
-        payload["databases"] = normalized
+        payload["databases"] = self._sanitize_business_databases(normalized, plan_map)
         payload["relations"] = self._merge_relation_defs(
             payload.get("relations", []),
-            self._infer_relations_from_multi_db(normalized),
+            self._infer_relations_from_multi_db(payload["databases"]),
         )
         return payload
 
-    def _fallback_relation_defs(self, state: Dict[str, Any], databases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        db_names = {db.get("name", "") for db in databases}
-        relation_defs = []
-        if "claims" in db_names:
-            relation_defs.append({
-                "from_db": "claims",
-                "from_field": "subject",
-                "to_db": "entities",
-                "to_field": "id",
-                "relation_type": "many_to_one",
-            })
-        if "relations" in db_names:
-            relation_defs.append({
-                "from_db": "relations",
-                "from_field": "source",
-                "to_db": "entities",
-                "to_field": "id",
-                "relation_type": "many_to_one",
-            })
-            relation_defs.append({
-                "from_db": "relations",
-                "from_field": "target",
-                "to_db": "entities",
-                "to_field": "id",
-                "relation_type": "many_to_one",
-            })
-        for relation in state.get("relations", []):
-            source_type = self._entity_type_for_id(state.get("entities", []), relation.get("source", ""))
-            target_type = self._entity_type_for_id(state.get("entities", []), relation.get("target", ""))
-            if source_type and target_type:
-                relation_defs.append({
-                    "from_db": f"{source_type}s",
-                    "from_field": "id",
-                    "to_db": f"{target_type}s",
-                    "to_field": "id",
-                    "relation_type": relation.get("relation", "linked_to"),
-                })
-        deduped = []
-        seen = set()
-        for row in relation_defs:
-            key = tuple(row.get(k, "") for k in ["from_db", "from_field", "to_db", "to_field", "relation_type"])
-            if key not in seen:
-                seen.add(key)
-                deduped.append(row)
-        return deduped
+    def _sanitize_business_databases(self, databases: List[Dict[str, Any]], plan_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        entity_table_row_ids: set[str] = set()
+        for database in databases:
+            plan = plan_map.get(database.get("name", ""), {})
+            if plan.get("row_source") != "entities":
+                continue
+            entity_table_row_ids.update(self._database_row_ids(database))
+
+        kept: List[Dict[str, Any]] = []
+        seen_business_signatures: Dict[tuple[str, ...], str] = {}
+        for database in databases:
+            plan = plan_map.get(database.get("name", ""), {})
+            if database.get("visibility") != "business":
+                kept.append(database)
+                continue
+
+            row_source = plan.get("row_source", "entities")
+            row_ids = tuple(sorted(self._database_row_ids(database)))
+            has_specific_values = self._has_table_specific_values(database, plan)
+
+            if row_source != "entities" and row_ids and set(row_ids) == entity_table_row_ids and not has_specific_values:
+                self.trace.log(
+                    "multi_db_table_pruned",
+                    table=database.get("name", ""),
+                    reason="duplicates_entity_pool",
+                )
+                continue
+
+            if row_source != "entities" and row_ids and row_ids in seen_business_signatures and not has_specific_values:
+                self.trace.log(
+                    "multi_db_table_pruned",
+                    table=database.get("name", ""),
+                    reason="duplicates_other_business_table",
+                    duplicate_of=seen_business_signatures[row_ids],
+                )
+                continue
+
+            kept.append(database)
+            if database.get("visibility") == "business" and row_ids:
+                seen_business_signatures[row_ids] = database.get("name", "")
+        return kept
 
     @staticmethod
-    def _flatten_entity_row(entity: Dict[str, Any]) -> Dict[str, Any]:
-        row = {
-            "id": entity.get("id", ""),
-            "entity_id": entity.get("id", ""),
-            "name": entity.get("name", ""),
-            "type": entity.get("type", ""),
-            "confidence": entity.get("confidence", 0),
-            "source_refs": entity.get("source_refs", []),
-            "updated_at": entity.get("updated_at", ""),
+    def _database_row_ids(database: Dict[str, Any]) -> List[str]:
+        primary_key = database.get("primary_key", "id")
+        row_ids: List[str] = []
+        for row in database.get("rows", []):
+            value = row.get(primary_key) or row.get("id") or row.get("entity_id") or row.get("event_id") or row.get("claim_id")
+            if value is not None:
+                row_ids.append(str(value))
+        return row_ids
+
+    @staticmethod
+    def _has_table_specific_values(database: Dict[str, Any], plan: Dict[str, Any]) -> bool:
+        generic_fields = {
+            "id",
+            "entity_id",
+            "event_id",
+            "claim_id",
+            "relation_id",
+            "name",
+            "title",
+            "type",
+            "description",
+            "confidence",
+            "source_ref",
+            "source_refs",
+            "updated_at",
+            "created_at",
+            "status",
+            "tags",
         }
-        row.update(entity.get("attributes", {}))
-        return row
-
-    @staticmethod
-    def _flatten_claim_row(claim: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "id": claim.get("id", claim.get("claim_id", "")),
-            "claim_id": claim.get("id", claim.get("claim_id", "")),
-            "subject": claim.get("subject", ""),
-            "predicate": claim.get("predicate", ""),
-            "object": claim.get("object", ""),
-            "claim_text": claim.get("claim_text", ""),
-            "claim_type": claim.get("claim_type", ""),
-            "confidence": claim.get("confidence", 0),
-            "source_ref": claim.get("source_ref", ""),
-        }
-
-    @staticmethod
-    def _flatten_relation_row(relation: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "id": f"{relation.get('source', '')}:{relation.get('relation', '')}:{relation.get('target', '')}",
-            "relation_id": f"{relation.get('source', '')}:{relation.get('relation', '')}:{relation.get('target', '')}",
-            "source": relation.get("source", ""),
-            "relation": relation.get("relation", ""),
-            "target": relation.get("target", ""),
-            "confidence": relation.get("confidence", 0),
-            "source_refs": relation.get("source_refs", []),
-        }
-
-    @staticmethod
-    def _build_source_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-        counts: Dict[str, int] = {}
-        for entity in state.get("entities", []):
-            for source_ref in entity.get("source_refs", []):
-                counts[source_ref] = counts.get(source_ref, 0) + 1
-        for claim in state.get("claims", []):
-            source_ref = claim.get("source_ref", "")
-            if source_ref:
-                counts[source_ref] = counts.get(source_ref, 0) + 1
-        return [{"id": source_ref, "name": source_ref, "mentions": count} for source_ref, count in sorted(counts.items())]
+        suggested = set(plan.get("suggested_fields", []))
+        row_source = plan.get("row_source", "entities")
+        row_specific_fields = [field for field in suggested if field not in generic_fields]
+        if row_source == "entities":
+            return True
+        if not row_specific_fields:
+            return False
+        for row in database.get("rows", []):
+            for field in row_specific_fields:
+                value = row.get(field)
+                if value not in (None, "", [], {}):
+                    return True
+        return False
 
     @staticmethod
     def _collect_columns(rows: List[Dict[str, Any]]) -> List[str]:
@@ -811,207 +820,8 @@ class VaultRuntime:
         return merged
 
     @staticmethod
-    def _entity_type_for_id(entities: List[Dict[str, Any]], entity_id: str) -> str:
-        for entity in entities:
-            if entity.get("id") == entity_id:
-                return entity.get("type", "")
-        return ""
-
-    @staticmethod
     def _infer_database_visibility(name: str) -> str:
         return "system" if name in {"claims", "relations", "sources"} else "business"
-
-    def _fallback_parse_chunk(self, chunk) -> Dict[str, Any]:
-        if chunk.context_hints.get("source_type") == "chat" or self._looks_like_chat(chunk.text):
-            return self._fallback_parse_chat_chunk(chunk)
-        docs = [{
-            "text": chunk.text,
-            "source": chunk.source_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "speaker": chunk.context_hints.get("author", "unknown"),
-        }]
-        result = self.rule_parser.parse(docs, workspace_id=self.ctx.workspace_id)
-        return self._normalize_parse_result(result, chunk)
-
-    @staticmethod
-    def _looks_like_chat(text: str) -> bool:
-        lines = [line.strip() for line in str(text).splitlines() if line.strip()]
-        if len(lines) < 3:
-            return False
-        chat_lines = 0
-        for line in lines[:30]:
-            if ":" in line or "：" in line or line.startswith("["):
-                prefix = re.split(r"[:：\]]", line, maxsplit=1)[0].strip("[ ")
-                if 0 < len(prefix) <= 24:
-                    chat_lines += 1
-        return chat_lines >= max(3, len(lines) // 3)
-
-    def _fallback_parse_chat_chunk(self, chunk) -> Dict[str, Any]:
-        messages = ChatAdapter._parse_messages(chunk.text)
-        source_id = chunk.source_id
-        speakers = []
-        for message in messages:
-            author = (message.get("author") or "unknown").strip()
-            if author and author not in speakers and author != "unknown":
-                speakers.append(author)
-
-        speaker_ids = {speaker: f"ent_person_{self._slug_name(speaker)}" for speaker in speakers}
-        entities: List[Dict[str, Any]] = []
-        claims: List[Dict[str, Any]] = []
-        relations: List[Dict[str, Any]] = []
-        events: List[Dict[str, Any]] = []
-
-        speaker_stats: Dict[str, Dict[str, Any]] = {
-            speaker: {"message_count": 0, "tone_tags": set(), "signals": []} for speaker in speakers
-        }
-
-        primary_target = speakers[1] if len(speakers) == 2 else ""
-        for idx, message in enumerate(messages, start=1):
-            speaker = (message.get("author") or "unknown").strip()
-            text = (message.get("text") or "").strip()
-            if not text or speaker == "unknown" or speaker not in speaker_ids:
-                continue
-
-            speaker_stats[speaker]["message_count"] += 1
-            target = next((name for name in speakers if name != speaker), primary_target)
-            tone_tags = self._chat_tone_tags(text)
-            speaker_stats[speaker]["tone_tags"].update(tone_tags)
-
-            for predicate, value, claim_type in self._chat_claims_for_message(text, speaker, target, source_id, idx):
-                claims.append({
-                    "claim_id": f"claim_chat_{idx}_{len(claims)+1:03d}",
-                    "subject": speaker_ids[speaker],
-                    "predicate": predicate,
-                    "object": value,
-                    "claim_text": text,
-                    "claim_type": claim_type,
-                    "confidence": 0.62 if claim_type == "fact" else 0.52,
-                    "source_ref": source_id,
-                    "source_refs": [source_id],
-                    "status": "active",
-                })
-
-            event_type = self._chat_event_type(text)
-            if event_type:
-                participant_ids = [speaker_ids[speaker]]
-                if target and target in speaker_ids:
-                    participant_ids.append(speaker_ids[target])
-                events.append({
-                    "event_id": f"evt_chat_{idx:03d}",
-                    "type": event_type,
-                    "description": text,
-                    "participants": participant_ids,
-                    "timestamp": None,
-                    "source_refs": [source_id],
-                    "status": "active",
-                })
-
-            if target and target in speaker_ids:
-                relation_type = self._chat_relation_type(text)
-                if relation_type:
-                    relations.append({
-                        "source_entity": speaker_ids[speaker],
-                        "target_entity": speaker_ids[target],
-                        "relation_type": relation_type,
-                        "evidence": text,
-                        "source_refs": [source_id],
-                        "status": "active",
-                    })
-
-        for speaker in speakers:
-            stats = speaker_stats[speaker]
-            attributes = {
-                "message_count": stats["message_count"],
-                "tone_tags": sorted(stats["tone_tags"]),
-            }
-            entities.append({
-                "entity_id": speaker_ids[speaker],
-                "type": "person",
-                "name": speaker,
-                "attributes": attributes,
-                "source_refs": [source_id],
-                "status": "active",
-            })
-
-        if len(speakers) == 2:
-            relations.append({
-                "source_entity": speaker_ids[speakers[0]],
-                "target_entity": speaker_ids[speakers[1]],
-                "relation_type": "interacts_with",
-                "evidence": f"对话中双方都有发言，共 {len(messages)} 条消息。",
-                "source_refs": [source_id],
-                "status": "active",
-            })
-
-        return self._normalize_parse_result({
-            "claims": claims,
-            "entity_candidates": entities,
-            "relation_candidates": relations,
-            "event_candidates": events,
-        }, chunk)
-
-    @staticmethod
-    def _chat_tone_tags(text: str) -> List[str]:
-        tags: List[str] = []
-        if any(token in text for token in ["哈哈", "笑死", "😄", "😂"]):
-            tags.append("轻松")
-        if any(token in text for token in ["宝宝", "宝贝", "好看", "可爱", "🥺", "👉"]):
-            tags.append("亲密")
-        if any(token in text for token in ["困", "睡", "累"]):
-            tags.append("疲惫")
-        if any(token in text for token in ["侮辱", "背刺", "骂", "攻击", "尖酸刻薄"]):
-            tags.append("冲突")
-        return tags
-
-    def _chat_claims_for_message(self, text: str, speaker: str, target: str, source_id: str, idx: int):
-        claims: List[tuple[str, str, str]] = []
-        if any(token in text for token in ["好看", "可爱", "精致"]):
-            claims.append(("positive_impression", text, "opinion"))
-        if any(token in text for token in ["喜欢", "忍不住", "舍不得"]):
-            claims.append(("preference_signal", text, "opinion"))
-        if text.startswith("我") and any(token in text for token in ["困", "睡", "不困"]):
-            claims.append(("current_state", text, "fact"))
-        if any(token in text for token in ["去睡吧", "慢慢来", "没事"]):
-            claims.append(("care_signal", text, "fact"))
-        if any(token in text for token in ["拒绝", "不要"]):
-            claims.append(("boundary_signal", text, "fact"))
-        if any(token in text for token in ["侮辱", "背刺", "攻击", "骂", "尖酸刻薄"]):
-            claims.append(("conflict_experience", text, "fact"))
-        if any(token in text for token in ["问", "吗", "？", "?"]):
-            claims.append(("question_or_confirmation", text, "uncertain"))
-        if target and any(token in text for token in ["宝宝", "宝贝"]):
-            claims.append(("addresses_affectionately", target, "fact"))
-        return claims
-
-    @staticmethod
-    def _chat_event_type(text: str) -> str:
-        if any(token in text for token in ["侮辱", "背刺", "攻击", "骂", "尖酸刻薄"]):
-            return "conflict_discussion"
-        if any(token in text for token in ["好看", "可爱", "精致"]):
-            return "compliment"
-        if any(token in text for token in ["去睡吧", "慢慢来", "没事"]):
-            return "care"
-        if any(token in text for token in ["困", "睡"]):
-            return "rest_discussion"
-        if any(token in text for token in ["问", "吗", "？", "?"]):
-            return "question"
-        return ""
-
-    @staticmethod
-    def _chat_relation_type(text: str) -> str:
-        if any(token in text for token in ["宝宝", "宝贝", "好看", "可爱", "🥺", "👉"]):
-            return "close_to"
-        if any(token in text for token in ["去睡吧", "慢慢来", "没事"]):
-            return "cares_about"
-        if any(token in text for token in ["拒绝", "不要"]):
-            return "sets_boundary_with"
-        if any(token in text for token in ["侮辱", "背刺", "攻击", "骂", "尖酸刻薄"]):
-            return "shares_conflict_with"
-        return ""
-
-    @staticmethod
-    def _slug_name(value: str) -> str:
-        return "".join(ch.lower() if ch.isalnum() else "_" for ch in value).strip("_") or "unknown"
 
     def _normalize_parse_result(self, result: Dict[str, Any], chunk) -> Dict[str, Any]:
         source_id = chunk.source_id

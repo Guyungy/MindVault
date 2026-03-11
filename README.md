@@ -115,6 +115,47 @@ npm run dev
 http://localhost:4310
 ```
 
+## Current Structure
+
+当前项目已经收成三层：
+
+```text
+MindVault/
+├─ frontend/                 # Node.js 工作台与 API
+├─ config/                   # 模型、运行方式、技能、四智能体配置
+├─ docs/                     # 架构说明
+├─ tests/                    # Python 回归测试
+├─ main.py                   # 兼容入口，转发到当前 runtime
+├─ parser.py                 # 本地 fallback 解析器
+├─ claim_model.py            # fallback 解析器使用的数据模型
+└─ mindvault/
+   ├─ adapters/              # source -> chunk 适配
+   ├─ agents/                # 智能体定义 + 四个主智能体文档目录
+   │  ├─ *.yaml              # 内部执行定义
+   │  ├─ parsing/
+   │  ├─ governance/
+   │  ├─ modeling/
+   │  └─ publishing/
+   ├─ governance/            # 可信治理引擎
+   ├─ prompts/               # LLM 提示模板
+   ├─ runtime/               # 当前 Python 知识引擎主链
+   └─ schemas/               # 结构定义
+```
+
+### What Was Removed
+
+下面这些旧版 mesh / legacy pipeline 文件已经移除：
+
+- 根目录旧 runtime / mesh / visualizer / versioning / ingestion 相关 Python 文件
+- 旧的 `llm/` Python 封装
+- 未使用的 `mindvault/runtime/workflow_engine.py`
+- 未使用的 `mindvault/runtime/renderers/dashboard.py`
+
+现在主入口只有两条：
+
+- Web: `frontend/server.mjs`
+- Python: `python3 -m mindvault.runtime.app`
+
 
 
 ## Vision
