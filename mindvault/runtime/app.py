@@ -5,8 +5,10 @@ import hashlib
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Tuple
 
 from mindvault.runtime.workspace_store import WorkspaceStore, WorkspaceContext
@@ -55,6 +57,11 @@ class VaultRuntime:
             self.runtime_config_path = Path("config/runtime_config.json")
         self.router = ModelRouter(str(model_config))
         self.executor = AgentExecutor(self.router, self.trace)
+        self._parse_cache_path = self.ctx.config_dir / "parse_cache.json"
+        self._parse_cache = self._load_parse_cache()
+        self._parse_cache_lock = Lock()
+        self._parse_cache_dirty = False
+        self._parse_agent_signature = self._compute_agent_signature(Path("mindvault/agents/parse_agent.yaml"))
 
         # Knowledge store
         self.kb = KnowledgeStore(self.ctx.kb_path)
@@ -117,6 +124,9 @@ class VaultRuntime:
             self.trace.log("adapt_complete", chunk_count=len(all_chunks))
             task.log_step("adapt", "ok", chunks=len(all_chunks))
 
+            parse_workers = max(1, int(runtime_settings.get("concurrency", {}).get("parse_workers", 1) or 1))
+            modeling_workers = max(1, int(runtime_settings.get("concurrency", {}).get("modeling_workers", 1) or 1))
+
             self._mark_task(task, "parse", agent="parse_agent", resume_hint="Parsing chunks into atomic knowledge.")
             all_claims: List[Dict[str, Any]] = []
             all_entities: List[Dict[str, Any]] = []
@@ -124,31 +134,36 @@ class VaultRuntime:
             all_events: List[Dict[str, Any]] = []
 
             parse_agent_path = Path("mindvault/agents/parse_agent.yaml")
-            for chunk in all_chunks:
-                context = {
-                    "chunk_text": chunk.text,
-                    "source_id": chunk.source_id,
-                    "source_type": chunk.context_hints.get("source_type", "doc"),
-                    "language": chunk.context_hints.get("language", "en"),
-                    "context_note": chunk.context_hints.get("note", ""),
-                    "speakers": chunk.context_hints.get("speakers", []),
+            self.executor.load_agent(parse_agent_path)
+            with ThreadPoolExecutor(max_workers=min(parse_workers, max(1, len(all_chunks)))) as pool:
+                future_to_chunk = {
+                    pool.submit(self._execute_parse_chunk, parse_agent_path, chunk, task): chunk
+                    for chunk in all_chunks
                 }
-                result = self.executor.execute(parse_agent_path, context)
-                self._raise_on_agent_error(result, "parse_agent")
-
-                if isinstance(result, dict) and "claims" in result:
-                    normalized = self._normalize_parse_result(result, chunk)
-                    all_claims.extend(normalized.get("claims", []))
-                    all_entities.extend(normalized.get("entity_candidates", []))
-                    all_relations.extend(normalized.get("relation_candidates", []))
-                    all_events.extend(normalized.get("event_candidates", []))
-                else:
-                    raise RuntimeError(f"parse_agent returned no structured output for chunk {chunk.chunk_id}")
+                completed_chunks = 0
+                for future in as_completed(future_to_chunk):
+                    chunk = future_to_chunk[future]
+                    result = future.result()
+                    if isinstance(result, dict) and "claims" in result:
+                        normalized = self._normalize_parse_result(result, chunk)
+                        all_claims.extend(normalized.get("claims", []))
+                        all_entities.extend(normalized.get("entity_candidates", []))
+                        all_relations.extend(normalized.get("relation_candidates", []))
+                        all_events.extend(normalized.get("event_candidates", []))
+                    else:
+                        raise RuntimeError(f"parse_agent returned no structured output for chunk {chunk.chunk_id}")
+                    completed_chunks += 1
+                    task.heartbeat(
+                        step="parse",
+                        agent="parse_agent",
+                        resume_hint=f"Parsing chunks into atomic knowledge ({completed_chunks}/{len(all_chunks)}).",
+                    )
 
             self.trace.log("parse_complete",
                            claims=len(all_claims), entities=len(all_entities),
                            relations=len(all_relations), events=len(all_events))
             task.log_step("parse", "ok", claims=len(all_claims), entities=len(all_entities), relations=len(all_relations), events=len(all_events))
+            self._save_parse_cache()
 
             extracted_path = self._save_extracted(all_claims, all_entities, all_relations, all_events)
             task.add_artifact("extracted", str(extracted_path))
@@ -219,20 +234,37 @@ class VaultRuntime:
 
             if profile == "full" and report_enabled:
                 self._mark_task(task, "insight", agent="insight_generator", resume_hint="Generating insight summaries.")
-                insights = self._generate_insights(state, governance)
+                insights = self._generate_insights(state, governance, task=task)
                 self.kb.append_insights(insights)
                 state = self.kb.state
                 self.trace.log("insight_complete", count=len(insights))
                 task.log_step("insight", "ok", count=len(insights))
 
+            change_scope = self._build_change_scope(
+                entities=fragment.get("entity_candidates", []),
+                claims=all_claims,
+                relations=all_relations,
+                events=all_events,
+            )
             self._mark_task(task, "database_plan", agent="ontology_agent", resume_hint="Planning business tables and relationships.")
-            database_plan = self._generate_database_plan(state, governance)
+            database_plan, plan_reused = self._resolve_database_plan(state, governance, change_scope, runtime_settings, task=task)
             database_plan_path = self._write_database_plan(database_plan)
             task.add_artifact("database_plan", str(database_plan_path))
-            task.log_step("database_plan", "ok", databases=len(database_plan.get("databases", [])), output=str(database_plan_path))
-
+            task.log_step(
+                "database_plan",
+                "ok",
+                databases=len(database_plan.get("databases", [])),
+                output=str(database_plan_path),
+                reused=plan_reused,
+            )
             self._mark_task(task, "multi_db", agent="database_builder_agent", resume_hint="Building structured tables from the approved plan.")
-            multi_db, multi_db_warnings = self._generate_multi_db(state, database_plan)
+            multi_db, multi_db_warnings = self._generate_multi_db(
+                state,
+                database_plan,
+                workers=modeling_workers,
+                change_scope=change_scope,
+                task=task,
+            )
             multi_db_paths = self._export_multi_db(database_plan, multi_db)
             self.trace.log("multi_db_export_complete", data=multi_db_paths.get("data", ""))
             for name, value in multi_db_paths.items():
@@ -243,6 +275,7 @@ class VaultRuntime:
                 output=multi_db_paths.get("data", ""),
                 warnings=len(multi_db_warnings),
                 tables=len(multi_db.get("databases", [])),
+                rebuilt_tables=multi_db.get("metadata", {}).get("rebuilt_tables", []),
             )
             optional_failures.extend(multi_db_warnings)
 
@@ -252,7 +285,7 @@ class VaultRuntime:
                     step="report",
                     agent="report_agent",
                     resume_hint="Writing report artifact.",
-                    runner=lambda: self._write_report(state, insights, governance),
+                    runner=lambda: self._write_report(state, insights, governance, task=task),
                     optional_failures=optional_failures,
                 )
 
@@ -306,7 +339,9 @@ class VaultRuntime:
     def _load_runtime_settings(self) -> Dict[str, Any]:
         fallback = {
             "execution": {"profile": "fast", "engine_mode": "llm_only"},
+            "planning": {"reuse_existing_plan": True},
             "artifacts": {"report": False},
+            "concurrency": {"parse_workers": 3, "modeling_workers": 2},
         }
         if not self.runtime_config_path.exists():
             return fallback
@@ -315,7 +350,9 @@ class VaultRuntime:
         except Exception:
             return fallback
         execution = raw.get("execution", {}) if isinstance(raw, dict) else {}
+        planning = raw.get("planning", {}) if isinstance(raw, dict) else {}
         artifacts = raw.get("artifacts", {}) if isinstance(raw, dict) else {}
+        concurrency = raw.get("concurrency", {}) if isinstance(raw, dict) else {}
         profile = execution.get("profile", "fast")
         if profile not in {"fast", "full"}:
             profile = "fast"
@@ -324,10 +361,99 @@ class VaultRuntime:
                 "profile": profile,
                 "engine_mode": "llm_only",
             },
+            "planning": {
+                "reuse_existing_plan": planning.get("reuse_existing_plan", True) is not False,
+            },
             "artifacts": {
                 "report": bool(artifacts.get("report", False)),
             },
+            "concurrency": {
+                "parse_workers": max(1, int((concurrency or {}).get("parse_workers", 3) or 3)),
+                "modeling_workers": max(1, int((concurrency or {}).get("modeling_workers", 2) or 2)),
+            },
         }
+
+    def _execute_parse_chunk(self, parse_agent_path: Path, chunk, task: TaskRuntime | None = None) -> Dict[str, Any]:
+        cache_key = self._fingerprint_parse_chunk(chunk)
+        with self._parse_cache_lock:
+            cached = self._parse_cache.get(cache_key)
+        if isinstance(cached, dict):
+            self.trace.log("parse_cache_hit", chunk_id=chunk.chunk_id, source_id=chunk.source_id)
+            return cached
+
+        context = {
+            "chunk_text": chunk.text,
+            "source_id": chunk.source_id,
+            "source_type": chunk.context_hints.get("source_type", "doc"),
+            "language": chunk.context_hints.get("language", "en"),
+            "context_note": chunk.context_hints.get("note", ""),
+            "speakers": chunk.context_hints.get("speakers", []),
+        }
+        result = self.executor.execute(
+            parse_agent_path,
+            context,
+            heartbeat=self._make_agent_progress_callback(
+                task,
+                step="parse",
+                agent="parse_agent",
+                resume_hint=f"正在解析分块 {chunk.chunk_id}，模型仍在处理中。",
+            ),
+        )
+        self._raise_on_agent_error(result, "parse_agent")
+        if isinstance(result, dict) and "claims" in result:
+            cache_payload = {
+                "claims": result.get("claims", []),
+                "entity_candidates": result.get("entity_candidates", []),
+                "relation_candidates": result.get("relation_candidates", []),
+                "event_candidates": result.get("event_candidates", []),
+            }
+            with self._parse_cache_lock:
+                self._parse_cache[cache_key] = cache_payload
+                self._parse_cache_dirty = True
+        return result
+
+    def _load_parse_cache(self) -> Dict[str, Any]:
+        if not self._parse_cache_path.exists():
+            return {}
+        try:
+            payload = json.loads(self._parse_cache_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        return {}
+
+    def _save_parse_cache(self) -> None:
+        with self._parse_cache_lock:
+            if not self._parse_cache_dirty:
+                return
+            payload = dict(self._parse_cache)
+            self._parse_cache_dirty = False
+        self._parse_cache_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _compute_agent_signature(agent_path: Path) -> str:
+        if not agent_path.exists():
+            return "missing-parse-agent"
+        content_parts = [agent_path.read_text(encoding="utf-8")]
+        prompt_match = re.search(r"^prompt_template:\s*(.+)$", content_parts[0], flags=re.MULTILINE)
+        if prompt_match:
+            prompt_path = Path(prompt_match.group(1).strip())
+            if prompt_path.exists():
+                content_parts.append(prompt_path.read_text(encoding="utf-8"))
+        return hashlib.sha1("\n\n".join(content_parts).encode("utf-8")).hexdigest()
+
+    def _fingerprint_parse_chunk(self, chunk) -> str:
+        parts = [
+            self._parse_agent_signature,
+            str(chunk.context_hints.get("source_type", "")),
+            str(chunk.context_hints.get("language", "")),
+            str(chunk.text or ""),
+        ]
+        return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
@@ -384,7 +510,7 @@ class VaultRuntime:
         }, indent=2, ensure_ascii=False), encoding="utf-8")
         return path
 
-    def _generate_insights(self, state: Dict[str, Any], governance: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _generate_insights(self, state: Dict[str, Any], governance: Dict[str, Any], task: TaskRuntime | None = None) -> List[Dict[str, Any]]:
         insight_agent_path = Path("mindvault/agents/insight_agent.yaml")
         if not insight_agent_path.exists():
             raise RuntimeError("insight_agent definition not found")
@@ -395,7 +521,16 @@ class VaultRuntime:
             "events": state.get("events", []),
             "governance": governance,
         }
-        result = self.executor.execute(insight_agent_path, context)
+        result = self.executor.execute(
+            insight_agent_path,
+            context,
+            heartbeat=self._make_agent_progress_callback(
+                task,
+                step="insight",
+                agent="insight_generator",
+                resume_hint="正在生成洞察摘要，模型仍在处理中。",
+            ),
+        )
         self._raise_on_agent_error(result, "insight_agent")
         if isinstance(result, dict) and isinstance(result.get("insights"), list):
             return result["insights"]
@@ -403,7 +538,7 @@ class VaultRuntime:
             return result["items"]
         raise RuntimeError("insight_agent returned no structured insights output")
 
-    def _generate_report(self, state, insights, governance) -> Dict[str, Any]:
+    def _generate_report(self, state, insights, governance, task: TaskRuntime | None = None) -> Dict[str, Any]:
         report_agent_path = Path("mindvault/agents/report_agent.yaml")
         if not report_agent_path.exists():
             raise RuntimeError("report_agent definition not found")
@@ -415,7 +550,16 @@ class VaultRuntime:
             "insights": insights,
             "governance": governance,
         }
-        result = self.executor.execute(report_agent_path, context)
+        result = self.executor.execute(
+            report_agent_path,
+            context,
+            heartbeat=self._make_agent_progress_callback(
+                task,
+                step="report",
+                agent="report_agent",
+                resume_hint="正在生成报告内容，模型仍在处理中。",
+            ),
+        )
         self._raise_on_agent_error(result, "report_agent")
         if isinstance(result, dict) and "business_domain" in result:
             return result
@@ -423,8 +567,8 @@ class VaultRuntime:
             return result["content"]
         raise RuntimeError("report_agent returned no structured report output")
 
-    def _write_report(self, state, insights, governance) -> str:
-        report_data = self._generate_report(state, insights, governance)
+    def _write_report(self, state, insights, governance, task: TaskRuntime | None = None) -> str:
+        report_data = self._generate_report(state, insights, governance, task=task)
         self.ctx.report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
         return str(self.ctx.report_path)
 
@@ -439,12 +583,210 @@ class VaultRuntime:
         renderer = MultiDBRenderer(self.ctx.root_dir / "multi_db")
         return renderer.render(database_plan, multi_db, include_html=False)
 
-    def _generate_database_plan(self, state, governance) -> Dict[str, Any]:
+    def _load_existing_multi_db(self) -> Dict[str, Any]:
+        path = self.ctx.root_dir / "multi_db" / "multi_db.json"
+        if not path.exists():
+            return {"databases": [], "relations": []}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        return {"databases": [], "relations": []}
+
+    def _load_existing_database_plan(self) -> Dict[str, Any] | None:
+        path = self.ctx.root_dir / "multi_db" / "database_plan.json"
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("databases"), list) and payload.get("databases"):
+                return self._finalize_database_plan(payload)
+        except Exception:
+            pass
+        return None
+
+    def _build_change_scope(
+        self,
+        *,
+        entities: List[Dict[str, Any]],
+        claims: List[Dict[str, Any]],
+        relations: List[Dict[str, Any]],
+        events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        entity_ids = {
+            str(item.get("id", ""))
+            for item in entities
+            if item.get("id")
+        }
+        entity_types = {
+            str(item.get("type", "")).strip()
+            for item in entities
+            if str(item.get("type", "")).strip()
+        }
+        source_refs = set()
+        for record in claims + entities + events:
+            if isinstance(record.get("source_ref"), str) and record.get("source_ref"):
+                source_refs.add(record["source_ref"])
+            for source_ref in record.get("source_refs", []) or []:
+                if source_ref:
+                    source_refs.add(str(source_ref))
+        return {
+            "entity_ids": sorted(entity_ids),
+            "entity_types": sorted(entity_types),
+            "claim_count": len(claims),
+            "relation_count": len(relations),
+            "event_count": len(events),
+            "source_refs": sorted(source_refs),
+        }
+
+    @staticmethod
+    def _collect_planned_entity_types(database_plan: Dict[str, Any]) -> set[str]:
+        planned_types: set[str] = set()
+        for database in database_plan.get("databases", []) or []:
+            for entity_type in database.get("entity_types", []) or []:
+                normalized = str(entity_type).strip()
+                if normalized:
+                    planned_types.add(normalized)
+        return planned_types
+
+    def _should_reuse_database_plan(
+        self,
+        existing_plan: Dict[str, Any] | None,
+        change_scope: Dict[str, Any],
+        runtime_settings: Dict[str, Any],
+    ) -> bool:
+        if runtime_settings.get("planning", {}).get("reuse_existing_plan", True) is False:
+            return False
+        if not existing_plan or not existing_plan.get("databases"):
+            return False
+        changed_types = {
+            str(item).strip()
+            for item in change_scope.get("entity_types", [])
+            if str(item).strip()
+        }
+        if not changed_types:
+            return True
+        planned_types = self._collect_planned_entity_types(existing_plan)
+        if not planned_types:
+            return False
+        return changed_types.issubset(planned_types)
+
+    def _resolve_database_plan(
+        self,
+        state: Dict[str, Any],
+        governance: Dict[str, Any],
+        change_scope: Dict[str, Any],
+        runtime_settings: Dict[str, Any],
+        task: TaskRuntime | None = None,
+    ) -> Tuple[Dict[str, Any], bool]:
+        existing_plan = self._load_existing_database_plan()
+        if self._should_reuse_database_plan(existing_plan, change_scope, runtime_settings):
+            self.trace.log(
+                "database_plan_reused",
+                changed_entity_types=sorted(change_scope.get("entity_types", [])),
+                existing_tables=sorted(
+                    str(item.get("name", "")).strip()
+                    for item in (existing_plan or {}).get("databases", [])
+                    if str(item.get("name", "")).strip()
+                ),
+            )
+            return existing_plan or {"databases": [], "relations": []}, True
+        return self._generate_database_plan(state, governance, task=task), False
+
+    def _determine_affected_tables(
+        self,
+        database_plan: Dict[str, Any],
+        existing_multi_db: Dict[str, Any],
+        change_scope: Dict[str, Any],
+    ) -> set[str]:
+        existing_names = {
+            str(item.get("name", "")).strip()
+            for item in existing_multi_db.get("databases", [])
+            if str(item.get("name", "")).strip()
+        }
+        changed_types = {
+            str(item).strip()
+            for item in change_scope.get("entity_types", [])
+            if str(item).strip()
+        }
+        affected: set[str] = set()
+        for database in database_plan.get("databases", []):
+            name = str(database.get("name", "")).strip()
+            if not name:
+                continue
+            if name not in existing_names:
+                affected.add(name)
+                continue
+            row_source = str(database.get("row_source", "mixed") or "mixed").strip().lower()
+            entity_types = {
+                str(item).strip()
+                for item in (database.get("entity_types", []) or [])
+                if str(item).strip()
+            }
+            if row_source == "entities" and (not entity_types or entity_types & changed_types):
+                affected.add(name)
+                continue
+            if row_source == "claims" and change_scope.get("claim_count", 0):
+                affected.add(name)
+                continue
+            if row_source == "relations" and change_scope.get("relation_count", 0):
+                affected.add(name)
+                continue
+            if row_source == "events" and change_scope.get("event_count", 0):
+                affected.add(name)
+                continue
+            if row_source == "mixed" and (
+                (entity_types and entity_types & changed_types)
+                or change_scope.get("claim_count", 0)
+                or change_scope.get("relation_count", 0)
+                or change_scope.get("event_count", 0)
+            ):
+                affected.add(name)
+
+        if not affected:
+            affected = {
+                str(item.get("name", "")).strip()
+                for item in database_plan.get("databases", [])
+                if str(item.get("name", "")).strip()
+            }
+        return affected
+
+    @staticmethod
+    def _preserve_unaffected_databases(
+        existing_multi_db: Dict[str, Any],
+        database_plan: Dict[str, Any],
+        affected_table_names: set[str],
+    ) -> List[Dict[str, Any]]:
+        allowed_names = {
+            str(item.get("name", "")).strip()
+            for item in database_plan.get("databases", [])
+            if str(item.get("name", "")).strip()
+        }
+        preserved: List[Dict[str, Any]] = []
+        for database in existing_multi_db.get("databases", []):
+            name = str(database.get("name", "")).strip()
+            if not name or name in affected_table_names or name not in allowed_names:
+                continue
+            preserved.append(dict(database))
+        return preserved
+
+    def _generate_database_plan(self, state, governance, task: TaskRuntime | None = None) -> Dict[str, Any]:
         ontology_agent_path = Path("mindvault/agents/ontology_agent.yaml")
         if not ontology_agent_path.exists():
             raise RuntimeError("ontology_agent definition not found")
         context = self._build_modeling_context(state, governance)
-        result = self.executor.execute(ontology_agent_path, context)
+        result = self.executor.execute(
+            ontology_agent_path,
+            context,
+            heartbeat=self._make_agent_progress_callback(
+                task,
+                step="database_plan",
+                agent="ontology_agent",
+                resume_hint="正在规划数据表结构，模型仍在处理中。",
+            ),
+        )
         self._raise_on_agent_error(result, "ontology_agent")
         normalized = self._normalize_database_plan_result(result)
         if normalized:
@@ -478,80 +820,87 @@ class VaultRuntime:
             }
         return None
 
-    def _generate_multi_db(self, state, database_plan: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
+    def _generate_multi_db(
+        self,
+        state,
+        database_plan: Dict[str, Any],
+        workers: int = 1,
+        change_scope: Dict[str, Any] | None = None,
+        task: TaskRuntime | None = None,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
         database_builder_agent_path = Path("mindvault/agents/database_builder_agent.yaml")
         if not database_builder_agent_path.exists():
             raise RuntimeError("database_builder_agent definition not found")
+        self.executor.load_agent(database_builder_agent_path)
         built_databases: List[Dict[str, Any]] = []
         warnings: List[Dict[str, str]] = []
+        existing_multi_db = self._load_existing_multi_db()
+        affected_table_names = self._determine_affected_tables(
+            database_plan,
+            existing_multi_db,
+            change_scope or {},
+        )
+        self.trace.log(
+            "multi_db_incremental_scope",
+            affected_tables=sorted(affected_table_names),
+            existing_tables=sorted(item.get("name", "") for item in existing_multi_db.get("databases", [])),
+        )
+        database_specs = [
+            spec
+            for spec in database_plan.get("databases", [])
+            if spec.get("name", "") in affected_table_names
+        ]
+        direct_specs = [
+            spec for spec in database_specs
+            if self._can_build_direct_database(spec)
+        ]
+        llm_specs = [
+            spec for spec in database_specs
+            if not self._can_build_direct_database(spec)
+        ]
 
-        for database_spec in database_plan.get("databases", []):
-            single_plan = {
-                "domain": database_plan.get("domain", ""),
-                "generated_at": database_plan.get("generated_at", ""),
-                "databases": [database_spec],
-                "relations": [
-                    relation
-                    for relation in database_plan.get("relations", [])
-                    if relation.get("from_db") == database_spec.get("name") or relation.get("to_db") == database_spec.get("name")
-                ],
-            }
-            modeling_context = self._build_modeling_context(
-                state,
-                database_spec=database_spec,
-                database_plan=database_plan,
-            )
+        for database_spec in direct_specs:
+            payload = self._build_direct_database(state, database_spec)
+            built_databases.append(payload)
             self.trace.log(
-                "multi_db_table_context",
+                "multi_db_table_built_direct",
                 table=database_spec.get("name", ""),
-                entities=len(modeling_context.get("entities", [])),
-                claims=len(modeling_context.get("claims", [])),
-                relations=len(modeling_context.get("relations", [])),
-                events=len(modeling_context.get("events", [])),
+                row_source=database_spec.get("row_source", ""),
+                rows=len(payload.get("rows", [])),
             )
-            context_batches = self._split_modeling_context_into_batches(modeling_context)
-            try:
-                table_payloads: List[Dict[str, Any]] = []
-                for batch_index, batch_context in enumerate(context_batches, start=1):
-                    self.trace.log(
-                        "multi_db_table_batch",
-                        table=database_spec.get("name", ""),
-                        batch=batch_index,
-                        total_batches=len(context_batches),
-                        entities=len(batch_context.get("entities", [])),
-                        claims=len(batch_context.get("claims", [])),
-                        relations=len(batch_context.get("relations", [])),
-                        events=len(batch_context.get("events", [])),
-                    )
-                    context = {
-                        "database_plan": single_plan,
-                        **batch_context,
-                    }
-                    result = self.executor.execute(database_builder_agent_path, context)
-                    self._raise_on_agent_error(result, "database_builder_agent")
-                    normalized_tables = self._normalize_database_builder_result(result, database_spec)
-                    if not normalized_tables:
-                        raise RuntimeError(
-                            f"database_builder_agent returned no structured table output for '{database_spec.get('name', '')}'"
-                        )
-                    table_payloads.extend(normalized_tables)
 
-                built_databases.extend(self._merge_database_payloads(table_payloads, database_spec))
-            except Exception as exc:
-                error_text = str(exc)
-                self.trace.log(
-                    "multi_db_table_failed",
-                    table=database_spec.get("name", ""),
-                    error=error_text,
-                )
-                warnings.append(
-                    {
-                        "step": "multi_db",
-                        "agent": "database_builder_agent",
-                        "error": error_text,
-                        "table": database_spec.get("name", ""),
-                    }
-                )
+        with ThreadPoolExecutor(max_workers=min(max(1, workers), max(1, len(llm_specs)))) as pool:
+            future_to_table = {
+                pool.submit(
+                    self._build_single_database_payloads,
+                    database_builder_agent_path,
+                    database_plan,
+                    state,
+                    database_spec,
+                    task,
+                ): database_spec.get("name", "")
+                for database_spec in llm_specs
+            }
+            for future in as_completed(future_to_table):
+                table_name = future_to_table[future]
+                try:
+                    payloads = future.result()
+                    built_databases.extend(payloads)
+                except Exception as exc:
+                    error_text = str(exc)
+                    self.trace.log(
+                        "multi_db_table_failed",
+                        table=table_name,
+                        error=error_text,
+                    )
+                    warnings.append(
+                        {
+                            "step": "multi_db",
+                            "agent": "database_builder_agent",
+                            "error": error_text,
+                            "table": table_name,
+                        }
+                    )
 
         if not built_databases:
             details = "; ".join(
@@ -560,13 +909,252 @@ class VaultRuntime:
             )
             raise RuntimeError(details or "database_builder_agent produced no usable table output")
 
+        preserved_databases = self._preserve_unaffected_databases(
+            existing_multi_db,
+            database_plan,
+            affected_table_names,
+        )
         merged_payload = {
             "domain": database_plan.get("domain", ""),
             "generated_at": datetime.utcnow().isoformat(),
-            "databases": built_databases,
+            "databases": preserved_databases + built_databases,
             "relations": database_plan.get("relations", []),
+            "metadata": {
+                "rebuilt_tables": sorted(affected_table_names),
+                "preserved_tables": sorted(
+                    item.get("name", "")
+                    for item in preserved_databases
+                ),
+            },
         }
         return self._finalize_multi_db(merged_payload, database_plan), warnings
+
+    @staticmethod
+    def _can_build_direct_database(database_spec: Dict[str, Any]) -> bool:
+        row_source = str(database_spec.get("row_source", "mixed") or "mixed").strip().lower()
+        name = str(database_spec.get("name", "")).strip().lower()
+        return row_source in {"entities", "claims", "relations", "events"} or name == "sources"
+
+    def _build_direct_database(self, state: Dict[str, Any], database_spec: Dict[str, Any]) -> Dict[str, Any]:
+        row_source = str(database_spec.get("row_source", "mixed") or "mixed").strip().lower()
+        name = str(database_spec.get("name", "")).strip()
+
+        if row_source == "entities":
+            rows = self._build_entity_table_rows(state, database_spec)
+        elif row_source == "claims":
+            rows = self._build_claim_table_rows(state)
+        elif row_source == "relations":
+            rows = self._build_relation_table_rows(state)
+        elif row_source == "events":
+            rows = self._build_event_table_rows(state)
+        elif name.lower() == "sources":
+            rows = self._build_source_table_rows(state)
+        else:
+            rows = []
+
+        normalized_rows = [self._normalize_row_shape(item) for item in rows]
+        columns = self._collect_columns(normalized_rows)
+        planned_fields = [
+            field for field in database_spec.get("suggested_fields", [])
+            if field not in columns
+        ]
+        return {
+            "name": name,
+            "title": database_spec.get("title", name),
+            "description": database_spec.get("description", ""),
+            "primary_key": database_spec.get("primary_key") or self._infer_primary_key(columns + planned_fields),
+            "columns": columns + planned_fields,
+            "rows": normalized_rows,
+            "visibility": database_spec.get("visibility", self._infer_database_visibility(name)),
+        }
+
+    @staticmethod
+    def _build_entity_table_rows(state: Dict[str, Any], database_spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+        entity_types = {
+            str(item).strip()
+            for item in (database_spec.get("entity_types", []) or [])
+            if str(item).strip()
+        }
+        rows: List[Dict[str, Any]] = []
+        for entity in state.get("entities", []):
+            if entity_types and entity.get("type") not in entity_types:
+                continue
+            row = {
+                "id": entity.get("id", entity.get("entity_id", "")),
+                "name": entity.get("name", ""),
+                "type": entity.get("type", ""),
+                "confidence": entity.get("confidence"),
+                "source_refs": entity.get("source_refs", []),
+                "updated_at": entity.get("updated_at", ""),
+                "status": entity.get("status", ""),
+            }
+            if isinstance(entity.get("attributes"), dict):
+                row.update(entity.get("attributes", {}))
+            rows.append(row)
+        return rows
+
+    @staticmethod
+    def _build_claim_table_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for claim in state.get("claims", []):
+            rows.append({
+                "id": claim.get("id", claim.get("claim_id", "")),
+                "subject": claim.get("subject", ""),
+                "predicate": claim.get("predicate", ""),
+                "object": claim.get("object"),
+                "claim_type": claim.get("claim_type", ""),
+                "confidence": claim.get("confidence"),
+                "source_ref": claim.get("source_ref", ""),
+                "source_refs": claim.get("source_refs", []),
+                "updated_at": claim.get("updated_at", ""),
+                "status": claim.get("status", ""),
+            })
+        return rows
+
+    @staticmethod
+    def _build_relation_table_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for relation in state.get("relations", []):
+            source = relation.get("source", relation.get("source_entity", ""))
+            target = relation.get("target", relation.get("target_entity", ""))
+            rel_type = relation.get("relation", relation.get("relation_type", ""))
+            rows.append({
+                "id": f"{source}:{rel_type}:{target}",
+                "source": source,
+                "relation": rel_type,
+                "target": target,
+                "confidence": relation.get("confidence"),
+                "source_refs": relation.get("source_refs", []),
+                "updated_at": relation.get("updated_at", ""),
+                "status": relation.get("status", ""),
+            })
+        return rows
+
+    @staticmethod
+    def _build_event_table_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for event in state.get("events", []):
+            row = {
+                "id": event.get("id", event.get("event_id", "")),
+                "type": event.get("type", ""),
+                "description": event.get("description", ""),
+                "timestamp": event.get("timestamp", ""),
+                "participants": event.get("participants", []),
+                "confidence": event.get("confidence"),
+                "source_refs": event.get("source_refs", []),
+                "updated_at": event.get("updated_at", ""),
+                "status": event.get("status", ""),
+            }
+            if isinstance(event.get("attributes"), dict):
+                row.update(event.get("attributes", {}))
+            rows.append(row)
+        return rows
+
+    @staticmethod
+    def _build_source_table_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        source_map: Dict[str, Dict[str, Any]] = {}
+        def touch_source(source_id: str, kind: str) -> None:
+            if not source_id:
+                return
+            row = source_map.setdefault(source_id, {
+                "id": source_id,
+                "name": source_id,
+                "mentions": 0,
+                "kinds": [],
+            })
+            row["mentions"] += 1
+            if kind not in row["kinds"]:
+                row["kinds"].append(kind)
+
+        for entity in state.get("entities", []):
+            for source_ref in entity.get("source_refs", []) or []:
+                touch_source(str(source_ref), "entity")
+        for claim in state.get("claims", []):
+            if claim.get("source_ref"):
+                touch_source(str(claim.get("source_ref")), "claim")
+            for source_ref in claim.get("source_refs", []) or []:
+                touch_source(str(source_ref), "claim")
+        for event in state.get("events", []):
+            for source_ref in event.get("source_refs", []) or []:
+                touch_source(str(source_ref), "event")
+        return list(source_map.values())
+
+    def _build_single_database_payloads(
+        self,
+        database_builder_agent_path: Path,
+        database_plan: Dict[str, Any],
+        state: Dict[str, Any],
+        database_spec: Dict[str, Any],
+        task: TaskRuntime | None = None,
+    ) -> List[Dict[str, Any]]:
+        single_plan = {
+            "domain": database_plan.get("domain", ""),
+            "generated_at": database_plan.get("generated_at", ""),
+            "databases": [database_spec],
+            "relations": [
+                relation
+                for relation in database_plan.get("relations", [])
+                if relation.get("from_db") == database_spec.get("name") or relation.get("to_db") == database_spec.get("name")
+            ],
+        }
+        modeling_context = self._build_modeling_context(
+            state,
+            database_spec=database_spec,
+            database_plan=database_plan,
+        )
+        self.trace.log(
+            "multi_db_table_context",
+            table=database_spec.get("name", ""),
+            entities=len(modeling_context.get("entities", [])),
+            claims=len(modeling_context.get("claims", [])),
+            relations=len(modeling_context.get("relations", [])),
+            events=len(modeling_context.get("events", [])),
+        )
+        context_batches = self._split_modeling_context_into_batches(modeling_context)
+        table_payloads: List[Dict[str, Any]] = []
+        for batch_index, batch_context in enumerate(context_batches, start=1):
+            if task is not None:
+                task.log_step(
+                    "multi_db",
+                    "running",
+                    agent="database_builder_agent",
+                    resume_hint=f"正在生成数据表 {database_spec.get('title', database_spec.get('name', ''))}（第 {batch_index}/{len(context_batches)} 批）。",
+                    table=database_spec.get("name", ""),
+                    batch=batch_index,
+                    total_batches=len(context_batches),
+                )
+            self.trace.log(
+                "multi_db_table_batch",
+                table=database_spec.get("name", ""),
+                batch=batch_index,
+                total_batches=len(context_batches),
+                entities=len(batch_context.get("entities", [])),
+                claims=len(batch_context.get("claims", [])),
+                relations=len(batch_context.get("relations", [])),
+                events=len(batch_context.get("events", [])),
+            )
+            context = {
+                "database_plan": single_plan,
+                **batch_context,
+            }
+            result = self.executor.execute(
+                database_builder_agent_path,
+                context,
+                heartbeat=self._make_agent_progress_callback(
+                    task,
+                    step="multi_db",
+                    agent="database_builder_agent",
+                    resume_hint=f"正在生成数据表 {database_spec.get('title', database_spec.get('name', ''))}（第 {batch_index}/{len(context_batches)} 批），模型仍在处理中。",
+                ),
+            )
+            self._raise_on_agent_error(result, "database_builder_agent")
+            normalized_tables = self._normalize_database_builder_result(result, database_spec)
+            if not normalized_tables:
+                raise RuntimeError(
+                    f"database_builder_agent returned no structured table output for '{database_spec.get('name', '')}'"
+                )
+            table_payloads.extend(normalized_tables)
+        return self._merge_database_payloads(table_payloads, database_spec)
 
     def _normalize_database_builder_result(
         self,
@@ -750,10 +1338,6 @@ class VaultRuntime:
                     entity_by_id[item_id]
                     for item_id in referenced_ids
                     if item_id in entity_by_id
-                    and (
-                        not target_types
-                        or entity_by_id[item_id].get("type") in target_types
-                    )
                 ],
                 "id",
             )
@@ -1451,6 +2035,23 @@ class VaultRuntime:
     def _mark_task(task: TaskRuntime, step: str, *, agent: str = "", resume_hint: str = "") -> None:
         task.heartbeat(step=step, agent=agent, resume_hint=resume_hint)
         task.log_step(step, "running", agent=agent, resume_hint=resume_hint)
+
+    @staticmethod
+    def _make_agent_progress_callback(
+        task: TaskRuntime | None,
+        *,
+        step: str,
+        agent: str,
+        resume_hint: str,
+    ):
+        if task is None:
+            return None
+
+        def _callback() -> None:
+            task.heartbeat(step=step, agent=agent, resume_hint=resume_hint)
+            task.log_step(step, "running", agent=agent, resume_hint=resume_hint)
+
+        return _callback
 
 
 def main():

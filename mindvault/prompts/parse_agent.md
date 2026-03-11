@@ -52,7 +52,16 @@
     "system_requirement": "可选",
     "resource_url": "可选",
     "preference": "可选",
-    "status": "可选"
+    "status": "可选",
+    "alias": "可选",
+    "concern": "可选",
+    "stance": "可选",
+    "opinion": "可选",
+    "style": "可选",
+    "capability": "可选",
+    "relationship_boundary": "可选",
+    "topic_focus": "可选",
+    "description": "可选"
   },
   "source_refs": ["{{source_id}}"]
 }
@@ -107,9 +116,10 @@
 4. 不要编造文本中没有的信息
 5. 保留原文语言（中文则继续用中文作为 name 和 description）
 6. 对实体 attributes 尽量补出细字段，而不是只留空对象；特别关注：
-   - 人物：role, preference, concern, boundary, opinion, deployment_preference
-   - 产品：deployment_mode, system_requirement, background_running, can_register_as_service, component, version, url
-   - 组织/地点：platform_type, location, scope, website
+   - 人物：role, alias, preference, concern, boundary, opinion, stance, style, capability, relationship_boundary, topic_focus
+   - 产品：deployment_mode, system_requirement, background_running, can_register_as_service, component, version, url, status, feature, limitation
+   - 组织/地点：platform_type, location, scope, website, business_type, scene, activity_type
+   - 主题/术语：description, topic_focus, stance, source_context
 7. claim 的 predicate 尽量短而明确，不要直接复制整句原文
 8. event 要尽量表达“发生了什么”，不要只写成模糊摘要
 9. 如果文本里有 URL、命令、版本号、配置方式、系统名、时间点、金额、报价、资源标题，请尽量保留进结构化字段
@@ -122,4 +132,17 @@
 11. 如果 context_note 提到“个人数据库”或“个人信息数据库”，不要把输出做成泛泛的 `organization/area/service` 风格；优先输出对人物档案和互动记录有用的信息。
 12. 对聊天记录，不要把“别人”“她们”“有人”这类泛指代词轻易当成稳定实体；只有反复出现且可追踪时才建实体。
 13. 对聊天记录，优先少而准，但对明确出现的偏好、建议、资源分享、互动动作要尽量提全。
-14. 如果没有某一类结果，返回空数组，不要返回解释文字。
+14. 如果文本里存在强情绪表达、争议黑话、攻击性判断、特殊标签或其他有分析价值的表达信号，不要当作普通噪声略过。请至少做一件事：
+   - 把它拆成 `claim`，`claim_type` 优先用 `opinion`、`rumor` 或 `uncertain`
+   - 如果存在明确的说话人和指向对象，优先生成对应 `event` 或 `relation`
+   - 只有当这个词本身在讨论里具有独立分析价值时，才把它提成实体；此时可用 `type: "topic"`、`type: "term"` 或其他合适类型
+15. 对聊天记录，不要把“妈妈”“儿子”“妹子”“有人”这类泛角色直接稳定化为高质量 person；除非它们是讨论核心且可反复追踪，否则更适合作为 claim/object/event participant。
+16. 对强主观、情绪化、特殊表达句子，优先保留：
+   - 原句 `claim_text`
+   - 说话人
+   - 指向对象
+   - 表达类型可放进 `predicate` 或 entity attributes 中
+17. 如果没有某一类结果，返回空数组，不要返回解释文字。
+18. 对人物、组织、产品、地点，不要只抽“名称”。如果文本里能看出任何画像信息、身份特征、风格倾向、立场、偏好、能力、边界、状态、典型行为，都优先写进 attributes。
+19. 对同一人物在不同句子里出现的多个画像线索，尽量合并到同一个 entity attributes，而不是拆成多个极其相似的人物实体。
+20. 对群聊/社群资料，人物画像是重点；对产品/组织/地点，也要尽量补充“是什么、做什么、被如何评价、和谁有关、在什么情境出现”。

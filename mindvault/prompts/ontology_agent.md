@@ -47,10 +47,31 @@
   - 技术讨论
   - 资源分享
   - 部署/运行记录
+- 对聊天/社群/群聊资料，优先考虑这几类表：
+  - 人物画像
+  - 被讨论对象
+  - 话题
+  - 观点/表达信号
+  - 互动事件
 - `suggested_fields` 要尽量细，不要只给 `id/name/type`
+- 人物、产品、组织、地点等实体表，`suggested_fields` 必须尽量支持画像，不要只给名字和类型。
+  例如人物表可考虑：
+  - `name`
+  - `alias`
+  - `role`
+  - `style`
+  - `preference`
+  - `concern`
+  - `stance`
+  - `opinion`
+  - `capability`
+  - `relationship_boundary`
+  - `topic_focus`
+- 产品/组织/地点也应尽量设计出特征字段，而不是只有 `id/name/type`
 - 如果一张派生表的真实粒度是“discussion / share / recommendation / deployment_record”，请明确写进 `record_granularity`
 - `relations` 要尽量把跨表连接想清楚，例如 `discussion -> product`, `share -> person`, `product -> organization`
 - 如果输入里存在 URL、教程、报告、命令、部署方式、系统环境、价格或建议，这些要体现在主表字段设计中
+- 如果输入里存在明显的人物特征、对象特征、表达习惯、角色代称、常见观点、互动边界，请把它们优先体现在实体表的字段设计中
 - 只输出合法 JSON
 
 输入：

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 from main import run_pipeline
+from mindvault.runtime.models import NormalizedChunk
 from mindvault.runtime.app import VaultRuntime, load_sources_from_path
 from mindvault.runtime.bash_runner import BashRunner
 from mindvault.runtime.renderers.wiki import WikiExporter
@@ -159,7 +160,7 @@ class MindVaultV02Tests(unittest.TestCase):
             )
         return {"domain": database_plan.get("domain", "Test Domain"), "databases": databases, "relations": []}
 
-    def _mock_llm_execute(self, agent_path, context):
+    def _mock_llm_execute(self, agent_path, context, **kwargs):
         path_text = str(agent_path)
         if path_text.endswith("parse_agent.yaml"):
             return self._mock_parse_result(context.get("chunk_text", ""))
@@ -486,9 +487,32 @@ class MindVaultV02Tests(unittest.TestCase):
         entity_ids = {item["id"] for item in context["entities"]}
         self.assertIn("ent_product_claw", entity_ids)
         self.assertIn("ent_org_lab", entity_ids)
-        self.assertNotIn("ent_person_alice", entity_ids)
+        self.assertIn("ent_person_alice", entity_ids)
         claim_subjects = {item["subject"] for item in context["claims"]}
         self.assertTrue(claim_subjects.issubset({"ent_product_claw", "ent_person_alice"}))
+
+    def test_parse_cache_reuses_same_chunk_result(self):
+        runtime = VaultRuntime(self.workspace)
+        chunk = NormalizedChunk(
+            chunk_id="chunk_1",
+            source_id="src_1",
+            chunk_type="section",
+            text="Alice: hello\nBob: hi",
+            context_hints={"source_type": "chat", "language": "en"},
+        )
+        runtime.executor.execute = mock.Mock(
+            return_value={
+                "claims": [],
+                "entity_candidates": [],
+                "relation_candidates": [],
+                "event_candidates": [],
+            }
+        )
+
+        runtime._execute_parse_chunk(Path("mindvault/agents/parse_agent.yaml"), chunk)
+        runtime._execute_parse_chunk(Path("mindvault/agents/parse_agent.yaml"), chunk)
+
+        self.assertEqual(runtime.executor.execute.call_count, 1)
 
     def test_finalize_multi_db_prunes_duplicate_derived_business_tables(self):
         runtime = VaultRuntime(self.workspace)
@@ -551,6 +575,77 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertIn("products", names)
         self.assertNotIn("usage_records", names)
 
+    def test_determine_affected_tables_only_marks_changed_tables(self):
+        runtime = VaultRuntime(self.workspace)
+        database_plan = {
+            "databases": [
+                {"name": "persons", "entity_types": ["person"], "row_source": "entities"},
+                {"name": "products", "entity_types": ["product"], "row_source": "entities"},
+                {"name": "resource_shares", "entity_types": [], "row_source": "events"},
+            ]
+        }
+        existing_multi_db = {
+            "databases": [
+                {"name": "persons", "rows": [{"id": "p1"}]},
+                {"name": "products", "rows": [{"id": "prod_1"}]},
+                {"name": "resource_shares", "rows": [{"id": "share_1"}]},
+            ]
+        }
+        scope = {
+            "entity_types": ["product"],
+            "claim_count": 1,
+            "relation_count": 0,
+            "event_count": 0,
+        }
+
+        affected = runtime._determine_affected_tables(database_plan, existing_multi_db, scope)
+
+        self.assertIn("products", affected)
+        self.assertNotIn("persons", affected)
+        self.assertNotIn("resource_shares", affected)
+
+    def test_should_reuse_database_plan_when_changed_types_are_already_covered(self):
+        runtime = VaultRuntime(self.workspace)
+        existing_plan = {
+            "databases": [
+                {"name": "persons", "entity_types": ["person"], "row_source": "entities"},
+                {"name": "products", "entity_types": ["product"], "row_source": "entities"},
+            ],
+            "relations": [],
+        }
+        change_scope = {
+            "entity_types": ["product"],
+            "claim_count": 2,
+            "relation_count": 1,
+            "event_count": 0,
+        }
+        runtime_settings = {
+            "planning": {"reuse_existing_plan": True},
+        }
+
+        self.assertTrue(runtime._should_reuse_database_plan(existing_plan, change_scope, runtime_settings))
+
+    def test_should_not_reuse_database_plan_when_new_types_appear(self):
+        runtime = VaultRuntime(self.workspace)
+        existing_plan = {
+            "databases": [
+                {"name": "persons", "entity_types": ["person"], "row_source": "entities"},
+                {"name": "products", "entity_types": ["product"], "row_source": "entities"},
+            ],
+            "relations": [],
+        }
+        change_scope = {
+            "entity_types": ["organization"],
+            "claim_count": 0,
+            "relation_count": 0,
+            "event_count": 0,
+        }
+        runtime_settings = {
+            "planning": {"reuse_existing_plan": True},
+        }
+
+        self.assertFalse(runtime._should_reuse_database_plan(existing_plan, change_scope, runtime_settings))
+
     def test_generate_multi_db_accepts_single_table_payload_shape(self):
         runtime = VaultRuntime(self.workspace)
         runtime.executor.execute = mock.Mock(
@@ -574,7 +669,7 @@ class MindVaultV02Tests(unittest.TestCase):
                     "description": "产品实体",
                     "suggested_fields": ["id", "name", "type"],
                     "visibility": "business",
-                    "row_source": "entities",
+                    "row_source": "mixed",
                 }
             ],
             "relations": [],
@@ -592,6 +687,50 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(len(multi_db["databases"]), 1)
         self.assertEqual(multi_db["databases"][0]["name"], "products")
         self.assertEqual(multi_db["databases"][0]["rows"][0]["name"], "OpenClaw")
+
+    def test_generate_multi_db_builds_entity_tables_without_llm(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock()
+        database_plan = {
+            "domain": "产品域",
+            "databases": [
+                {
+                    "name": "persons",
+                    "title": "人物",
+                    "description": "人物实体",
+                    "suggested_fields": ["id", "name", "type", "role"],
+                    "visibility": "business",
+                    "row_source": "entities",
+                    "entity_types": ["person"],
+                }
+            ],
+            "relations": [],
+        }
+        state = {
+            "entities": [
+                {
+                    "id": "ent_person_alice",
+                    "name": "Alice",
+                    "type": "person",
+                    "attributes": {"role": "admin"},
+                    "source_refs": ["src_1"],
+                    "confidence": 0.9,
+                    "updated_at": "2026-03-11T00:00:00",
+                    "status": "active",
+                }
+            ],
+            "claims": [],
+            "relations": [],
+            "events": [],
+        }
+
+        multi_db, warnings = runtime._generate_multi_db(state, database_plan)
+
+        self.assertEqual(runtime.executor.execute.call_count, 0)
+        self.assertEqual(warnings, [])
+        self.assertEqual(multi_db["databases"][0]["name"], "persons")
+        self.assertEqual(multi_db["databases"][0]["rows"][0]["name"], "Alice")
+        self.assertEqual(multi_db["databases"][0]["rows"][0]["role"], "admin")
 
     def test_generate_multi_db_keeps_partial_success_when_one_table_fails(self):
         runtime = VaultRuntime(self.workspace)
@@ -612,14 +751,14 @@ class MindVaultV02Tests(unittest.TestCase):
                     "title": "产品",
                     "suggested_fields": ["id", "name", "type"],
                     "visibility": "business",
-                    "row_source": "entities",
+                    "row_source": "mixed",
                 },
                 {
                     "name": "organizations",
                     "title": "组织",
                     "suggested_fields": ["id", "name", "type"],
                     "visibility": "business",
-                    "row_source": "entities",
+                    "row_source": "mixed",
                 },
             ],
             "relations": [],
@@ -707,7 +846,7 @@ class MindVaultV02Tests(unittest.TestCase):
         runtime = VaultRuntime(self.workspace)
         original_execute = runtime.executor.execute
 
-        def fake_execute(agent_path, context):
+        def fake_execute(agent_path, context, **kwargs):
             path_text = str(agent_path)
             if path_text.endswith("parse_agent.yaml"):
                 return {
@@ -725,10 +864,12 @@ class MindVaultV02Tests(unittest.TestCase):
                     "domain": "Test Domain",
                     "databases": [
                         {
-                            "name": "venues",
-                            "title": "地点",
-                            "entity_types": ["venue"],
-                            "suggested_fields": ["id", "name", "location"],
+                            "name": "activity_summaries",
+                            "title": "活动摘要",
+                            "entity_types": [],
+                            "row_source": "mixed",
+                            "record_granularity": "discussion",
+                            "suggested_fields": ["id", "summary", "venue_id", "topic"],
                             "visibility": "business",
                         }
                     ],

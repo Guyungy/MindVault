@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any, Dict, List, Tuple
 
 from mindvault.runtime.model_router import ModelRouter
@@ -40,7 +41,14 @@ class AgentExecutor:
             self._agent_cache[key] = self._parse_yaml_like(path.read_text(encoding="utf-8"))
         return self._agent_cache[key]
 
-    def execute(self, agent_path: str | Path, context: Dict[str, Any]) -> Dict[str, Any]:
+    def execute(
+        self,
+        agent_path: str | Path,
+        context: Dict[str, Any],
+        *,
+        heartbeat=None,
+        heartbeat_interval_seconds: float = 15.0,
+    ) -> Dict[str, Any]:
         """Execute an agent: load definition → build prompt → call LLM → parse result."""
         agent_def = self.load_agent(agent_path)
         agent_name = agent_def.get("name", "unknown_agent")
@@ -66,12 +74,30 @@ class AgentExecutor:
         max_output_tokens = int(agent_def.get("max_output_tokens", 0) or 0)
 
         role_prompt = agent_def.get("role", "You are a helpful assistant.")
-        result = client.chat(
-            user_prompt,
-            system_prompt=role_prompt,
-            max_retries=max_retries,
-            max_output_tokens=max_output_tokens or None,
-        )
+        stop_heartbeat = Event()
+        heartbeat_thread: Thread | None = None
+        if callable(heartbeat):
+            def _heartbeat_loop() -> None:
+                while not stop_heartbeat.wait(max(1.0, heartbeat_interval_seconds)):
+                    try:
+                        heartbeat()
+                    except Exception:
+                        return
+
+            heartbeat_thread = Thread(target=_heartbeat_loop, name=f"{agent_name}_heartbeat", daemon=True)
+            heartbeat_thread.start()
+
+        try:
+            result = client.chat(
+                user_prompt,
+                system_prompt=role_prompt,
+                max_retries=max_retries,
+                max_output_tokens=max_output_tokens or None,
+            )
+        finally:
+            stop_heartbeat.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=0.2)
 
         content = result.get("content", "")
         parsed = self._try_parse_json(content)

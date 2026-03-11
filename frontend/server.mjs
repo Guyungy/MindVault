@@ -426,12 +426,16 @@ async function handleModelConfigUpdate(req, res) {
 async function readRuntimeConfig() {
   const config = await readJsonSafe(runtimeConfigPath, {
     execution: { profile: "fast", engine_mode: "llm_only" },
+    planning: { reuse_existing_plan: true },
     artifacts: { report: false },
   });
   return {
     execution: {
       profile: ["fast", "full"].includes(config?.execution?.profile) ? config.execution.profile : "fast",
       engine_mode: "llm_only",
+    },
+    planning: {
+      reuse_existing_plan: config?.planning?.reuse_existing_plan !== false,
     },
     artifacts: {
       report: Boolean(config?.artifacts?.report),
@@ -443,14 +447,22 @@ async function handleRuntimeConfigUpdate(req, res) {
   try {
     const body = await readJsonBody(req);
     const current = await readRuntimeConfig();
+    const rawCurrent = await readJsonSafe(runtimeConfigPath, {});
     const next = {
       execution: {
         profile: ["fast", "full"].includes(body?.execution?.profile) ? body.execution.profile : current.execution.profile,
         engine_mode: "llm_only",
       },
+      planning: {
+        reuse_existing_plan:
+          typeof body?.planning?.reuse_existing_plan === "boolean"
+            ? body.planning.reuse_existing_plan
+            : current.planning.reuse_existing_plan,
+      },
       artifacts: {
         report: typeof body?.artifacts?.report === "boolean" ? body.artifacts.report : current.artifacts.report,
       },
+      concurrency: rawCurrent?.concurrency || { parse_workers: 3, modeling_workers: 2 },
     };
     await writeFile(runtimeConfigPath, JSON.stringify(next, null, 2), "utf-8");
     return sendJson(res, {
@@ -898,8 +910,8 @@ function buildQueuedTasks(queue) {
 
 function getTaskSortTimestamp(task) {
   const value = task?.created_at || task?.started_at || task?.last_heartbeat || task?.ended_at || "";
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? 0 : parsed;
+  const parsed = parseTaskTimestamp(value);
+  return parsed ?? 0;
 }
 
 function withWorkspaceQueueLock(workspaceId, fn) {
@@ -1037,7 +1049,7 @@ function streamFile(filePath, res) {
 function summarizeTask(task, recentSteps) {
   const heartbeatAgeSeconds = getHeartbeatAgeSeconds(task.last_heartbeat);
   const activityAgeSeconds = getActivityAgeSeconds(task, recentSteps);
-  const isStale = task.status === "running" && activityAgeSeconds !== null && activityAgeSeconds > 300;
+  const isStale = task.status === "running" && activityAgeSeconds !== null && activityAgeSeconds > 600;
   const recentFallbacks = recentSteps.filter((step) => step.status === "fallback").length;
   const recentFailures = recentSteps.filter((step) => step.status === "failed").length;
 
@@ -1112,8 +1124,8 @@ function extractStepOutputs(step) {
 
 function getHeartbeatAgeSeconds(value) {
   if (!value) return null;
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) return null;
+  const timestamp = parseTaskTimestamp(value);
+  if (timestamp === null) return null;
   return Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
 }
 
@@ -1160,15 +1172,24 @@ function readJsonBody(req) {
 function getActivityAgeSeconds(task, recentSteps) {
   const timestamps = [];
   if (task.last_heartbeat) {
-    const parsed = Date.parse(task.last_heartbeat);
-    if (!Number.isNaN(parsed)) timestamps.push(parsed);
+    const parsed = parseTaskTimestamp(task.last_heartbeat);
+    if (parsed !== null) timestamps.push(parsed);
   }
   for (const step of recentSteps || []) {
-    const parsed = Date.parse(step.timestamp || "");
-    if (!Number.isNaN(parsed)) timestamps.push(parsed);
+    const parsed = parseTaskTimestamp(step.timestamp || "");
+    if (parsed !== null) timestamps.push(parsed);
   }
   if (!timestamps.length) return null;
   return Math.max(0, Math.floor((Date.now() - Math.max(...timestamps)) / 1000));
+}
+
+function parseTaskTimestamp(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(normalized);
+  const utcLike = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+  const parsed = Date.parse(hasTimezone || !utcLike.test(normalized) ? normalized : `${normalized}Z`);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 function summarizeTaskImpact(task, rawSources, multiDb) {
@@ -1223,12 +1244,12 @@ function inferDatabaseVisibility(name) {
 
 function collectTaskSourceIds(task, rawSources) {
   if (!Array.isArray(rawSources)) return [];
-  const start = Date.parse(task.started_at || "");
-  const end = task.ended_at ? Date.parse(task.ended_at) : Date.now();
+  const start = parseTaskTimestamp(task.started_at || "");
+  const end = task.ended_at ? parseTaskTimestamp(task.ended_at) : Date.now();
   return rawSources
     .filter((source) => {
-      const timestamp = Date.parse(source.ingested_at || "");
-      if (Number.isNaN(timestamp) || Number.isNaN(start)) return false;
+      const timestamp = parseTaskTimestamp(source.ingested_at || "");
+      if (timestamp === null || start === null || end === null) return false;
       return timestamp >= start && timestamp <= end;
     })
     .map((source) => source.source_id)

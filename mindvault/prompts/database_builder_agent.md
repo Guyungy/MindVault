@@ -62,6 +62,14 @@
   - 建议/结论
   - 相关人物/产品/组织 ID
 - 如果某个字段可以拆成更具体列，例如 `deployment_mode / operating_system / background_running / resource_url / recommendation_type`，优先拆开
+- 如果当前表是人物、组织、产品、地点等实体表，请优先把“画像信息/特征信息”拆成细字段，而不是只输出名字列表。
+  例如：
+  - 人物：`alias / role / style / preference / concern / stance / opinion / capability / relationship_boundary / topic_focus`
+  - 产品：`component / version / deployment_mode / feature / limitation / product_type / owner_org`
+  - 组织：`platform_type / business_type / scope / location / role`
+  - 地点：`location / scene / activity_type / organizer / nearby_landmark`
+- 对实体表，每一行都应尽量回答“这个对象是什么、有什么特点、和谁/什么相关、目前处于什么状态”，而不是只回答“它叫什么”
+- 对聊天/社群资料，人物画像和对象画像是重点；如果有多个句子提供了同一对象的不同特征，尽量在一行内合并成更丰富的记录
 - 只输出合法 JSON
 
 输入：

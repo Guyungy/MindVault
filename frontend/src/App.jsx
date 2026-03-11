@@ -170,6 +170,7 @@ function AppShell() {
   const [modelSaveStatus, setModelSaveStatus] = useState(null);
   const [runtimeSaveStatus, setRuntimeSaveStatus] = useState(null);
   const [selectedExecutionProfile, setSelectedExecutionProfile] = useState("fast");
+  const [reuseExistingPlan, setReuseExistingPlan] = useState(true);
   const [reportArtifactEnabled, setReportArtifactEnabled] = useState(false);
   const [error, setError] = useState("");
   const [activeView, setActiveView] = useState(initialRoute.view || "overview");
@@ -369,6 +370,7 @@ function AppShell() {
       const result = await fetchJson("/api/runtime-settings");
       setRuntimeSettings(result);
       setSelectedExecutionProfile(result.execution?.profile || "fast");
+      setReuseExistingPlan(result.planning?.reuse_existing_plan !== false);
       setReportArtifactEnabled(Boolean(result.artifacts?.report));
     } catch (err) {
       setError(err.message);
@@ -410,6 +412,9 @@ function AppShell() {
           execution: {
             profile: selectedExecutionProfile,
           },
+          planning: {
+            reuse_existing_plan: reuseExistingPlan,
+          },
           artifacts: {
             report: reportArtifactEnabled,
           },
@@ -421,6 +426,7 @@ function AppShell() {
       }
       setRuntimeSettings(result);
       setSelectedExecutionProfile(result.execution?.profile || "fast");
+      setReuseExistingPlan(result.planning?.reuse_existing_plan !== false);
       setReportArtifactEnabled(Boolean(result.artifacts?.report));
       setRuntimeSaveStatus({ ok: true, message: result.message || "运行设置已保存。" });
     } catch (err) {
@@ -778,6 +784,7 @@ function AppShell() {
 
               {activeView === "input" ? (
                 <IngestPanel
+                  workspaceId={payload?.workspace || workspaceId}
                   noteField={noteField}
                   ingestStatus={ingestStatus}
                   latestTask={latestTask}
@@ -823,6 +830,13 @@ function AppShell() {
                   selectedTaskId={selectedTaskId}
                   onSelectTask={setSelectedTaskId}
                   onDeleteTask={deleteTask}
+                  onOpenTables={(task) => {
+                    const targetTable = task?.impact?.databases?.[0]?.name || businessTables[0]?.name || "";
+                    if (targetTable) {
+                      setActiveTable(targetTable);
+                    }
+                    setActiveView("tables");
+                  }}
                   deleteStatus={taskDeleteStatus}
                 />
               ) : null}
@@ -866,9 +880,11 @@ function AppShell() {
                   runtimeSettings={runtimeSettings}
                   selectedProviderId={selectedProviderId}
                   selectedExecutionProfile={selectedExecutionProfile}
+                  reuseExistingPlan={reuseExistingPlan}
                   reportArtifactEnabled={reportArtifactEnabled}
                   onProviderChange={setSelectedProviderId}
                   onExecutionProfileChange={setSelectedExecutionProfile}
+                  onReuseExistingPlanToggle={setReuseExistingPlan}
                   onReportArtifactToggle={setReportArtifactEnabled}
                   onSaveModel={saveModelSelection}
                   onSaveRuntimeSettings={saveRuntimeSettings}
@@ -1047,6 +1063,7 @@ function TablesView({
               </div>
               {viewMode === "table" ? (
                 <DataTable
+                  tableId={`${workspaceId || "workspace"}:table:${current.name}`}
                   columns={tableColumns}
                   data={filteredRows}
                   filterColumnId={heroColumn}
@@ -1309,6 +1326,7 @@ function NodeWorkspaceView({ workspaceId, tables, recentSources }) {
                 />
               ) : graphMode === "table" ? (
                 <DataTable
+                  tableId={`${workspaceId || "workspace"}:analysis:nodes`}
                   columns={nodeTableColumns}
                   data={filteredNodes}
                   filterColumnId="label"
@@ -1854,6 +1872,7 @@ function OverviewView({
 }
 
 function IngestPanel({
+  workspaceId,
   noteField,
   ingestStatus,
   latestTask,
@@ -1982,6 +2001,7 @@ function IngestPanel({
 
           {recentSources.length ? (
             <DataTable
+              tableId={`${workspaceId || "workspace"}:recent_sources`}
               columns={recentSourceColumns}
               data={recentSources}
               filterColumnId="source_id"
@@ -1998,12 +2018,13 @@ function IngestPanel({
   );
 }
 
-function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDeleteTask, deleteStatus }) {
+function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDeleteTask, onOpenTables, deleteStatus }) {
   const timeline = selectedTask?.stepTimeline || condenseStepEntries(selectedTask?.recentSteps || []);
   const coreTimeline = summarizeCoreTimeline(timeline, selectedTask);
   const eventLog = selectedTask?.stepEntries || selectedTask?.recentSteps || [];
   const liveStep = findLiveStep(selectedTask);
   const progress = selectedTask ? summarizeTaskProgress(selectedTask, coreTimeline) : null;
+  const resultSummary = selectedTask ? summarizeTaskResult(selectedTask) : null;
 
   return (
     <div className="grid gap-4 xl:grid-cols-[240px_1fr]">
@@ -2075,6 +2096,45 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDelete
                 </div>
               </div>
 
+              {resultSummary ? (
+                <div className="border-b border-[var(--border)]/70 pb-4">
+                  <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+                    <div className="border border-[var(--border)]/70 bg-[var(--background)] px-4 py-4">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">结果摘要</div>
+                      <div className="mt-2 text-lg font-semibold text-[var(--foreground)]">{resultSummary.headline}</div>
+                      <div className="mt-2 text-sm text-[var(--muted-foreground)]">{resultSummary.description}</div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <Badge variant={resultSummary.coreReady ? "default" : resultSummary.failed ? "danger" : "warm"}>
+                          {resultSummary.coreReady ? "核心数据已生成" : resultSummary.failed ? "核心数据未生成" : "核心数据生成中"}
+                        </Badge>
+                        <Badge variant={resultSummary.backgroundVariant}>
+                          后台补全：{resultSummary.backgroundLabel}
+                        </Badge>
+                        <Badge variant="outline">
+                          {selectedTask.impact?.source_count || 0} 条来源
+                        </Badge>
+                      </div>
+                    </div>
+                    <div className="border border-[var(--border)]/70 bg-[var(--background)] px-4 py-4">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">建议动作</div>
+                      <div className="mt-3 space-y-2 text-sm text-[var(--muted-foreground)]">
+                        <div>先看核心结果，不必等所有补全过程结束。</div>
+                        <div>如果核心数据已生成，直接进入数据表查看最新结构。</div>
+                        <div>只有“建库规划 / 数据表生成”失败，才需要重跑任务。</div>
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <Button size="sm" onClick={() => onOpenTables?.(selectedTask)} disabled={!resultSummary.coreReady}>
+                          查看数据表
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => onSelectTask?.(selectedTask.task_id)}>
+                          刷新任务详情
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               {progress ? (
                 <div className="border-b border-[var(--border)]/70 pb-4">
                   <div className="flex items-center justify-between gap-3">
@@ -2140,6 +2200,53 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDelete
                     <SummaryRow label="开始时间" value={formatTaskTime(liveStep.started_at || liveStep.timestamp)} />
                     <SummaryRow label="已运行" value={formatElapsed(liveStep.started_at || liveStep.timestamp)} />
                     <SummaryRow label="最后心跳" value={formatTaskTime(selectedTask.last_heartbeat)} />
+                  </div>
+                  <div className="mt-5 border-t border-[var(--border)]/60 pt-4">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-[var(--foreground)]">实时执行流</div>
+                        <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                          持续滚动展示当前阶段收到的关键事件和中间结果。
+                        </div>
+                      </div>
+                      <Badge variant="outline">{getFocusedTaskEvents(selectedTask, liveStep).length} 条</Badge>
+                    </div>
+                    <ScrollArea className="h-[240px] border border-[var(--border)]/70 bg-[var(--background)]">
+                      <div className="space-y-3 p-3">
+                        {getFocusedTaskEvents(selectedTask, liveStep).length ? (
+                          getFocusedTaskEvents(selectedTask, liveStep).map((entry, index) => {
+                            const details = summarizeTaskEventDetails(entry);
+                            return (
+                              <div key={`${entry.timestamp || index}-${entry.action || "event"}`} className="border-b border-[var(--border)]/60 pb-3 last:border-b-0">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="text-sm font-medium text-[var(--foreground)]">
+                                    {formatStepLabel(entry.action || selectedTask.current_step || "-")} · {mapStepStatus(entry.status)}
+                                  </div>
+                                  <div className="text-[11px] text-[var(--muted-foreground)]">{formatTaskTime(entry.timestamp)}</div>
+                                </div>
+                                <div className="mt-1 text-[11px] text-[var(--muted-foreground)]">
+                                  {formatAgentLabel(entry.agent || selectedTask.current_agent || "系统步骤")}
+                                </div>
+                                {entry.resume_hint ? (
+                                  <div className="mt-2 text-sm text-[var(--foreground)]">{entry.resume_hint}</div>
+                                ) : null}
+                                {details.length ? (
+                                  <div className="mt-3 flex flex-wrap gap-2">
+                                    {details.map((item) => (
+                                      <Badge key={item} variant="outline">{item}</Badge>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="mt-3 text-xs text-[var(--muted-foreground)]">当前还没有更多中间结果。</div>
+                                )}
+                              </div>
+                            );
+                          })
+                        ) : (
+                          <div className="text-sm text-[var(--muted-foreground)]">当前阶段还没有更多可展示的运行细节。</div>
+                        )}
+                      </div>
+                    </ScrollArea>
                   </div>
                 </div>
               ) : null}
@@ -2409,9 +2516,11 @@ function SettingsView({
   runtimeSettings,
   selectedProviderId,
   selectedExecutionProfile,
+  reuseExistingPlan,
   reportArtifactEnabled,
   onProviderChange,
   onExecutionProfileChange,
+  onReuseExistingPlanToggle,
   onReportArtifactToggle,
   onSaveModel,
   onSaveRuntimeSettings,
@@ -2455,6 +2564,20 @@ function SettingsView({
                 <div className="mt-2 text-xs text-[var(--muted-foreground)]">
                   当前引擎模式：{runtimeSettings?.execution?.engine_mode || "llm_only"}。主链路只依赖大模型返回结构化结果，控制台与知识页展示由 Node 前端负责。
                 </div>
+              </div>
+            </div>
+            <div className="mt-4">
+              <div className="mb-2 text-xs text-[var(--muted-foreground)]">建库规划</div>
+              <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+                <input
+                  type="checkbox"
+                  checked={reuseExistingPlan}
+                  onChange={(event) => onReuseExistingPlanToggle(event.target.checked)}
+                />
+                尽量复用已有数据表规划，只在结构明显变化时重建
+              </label>
+              <div className="mt-2 text-xs text-[var(--muted-foreground)]">
+                打开后会优先复用现有 database_plan，只重建受影响的数据表，通常能明显缩短录入后的等待时间。
               </div>
             </div>
             <div className="mt-4 flex items-center gap-3">
@@ -2947,6 +3070,83 @@ function summarizeTaskProgress(task, coreTimeline) {
   };
 }
 
+function didTaskStepSucceed(task, action) {
+  const entries = task?.stepEntries || task?.recentSteps || [];
+  return entries.some((step) => step.action === action && step.status === "ok");
+}
+
+function getBackgroundStageState(task) {
+  const entries = task?.stepEntries || task?.recentSteps || [];
+  const outputActions = new Set(["insight", "report", "dashboard", "wiki"]);
+  const outputEntries = entries.filter((step) => outputActions.has(step.action));
+  if (!outputEntries.length) return "not_enabled";
+  if (outputEntries.some((step) => step.status === "running")) return "running";
+  if (outputEntries.some((step) => ["failed", "blocked"].includes(step.status))) return "failed";
+  if (outputEntries.some((step) => step.status === "ok")) return "completed";
+  return "not_enabled";
+}
+
+function summarizeTaskResult(task) {
+  const coreReady = Boolean(task?.artifacts?.multi_db_data) || didTaskStepSucceed(task, "multi_db");
+  const failed = hasTaskFailure(task);
+  const backgroundState = getBackgroundStageState(task);
+  const backgroundMeta = {
+    not_enabled: { label: "未启用", variant: "outline" },
+    running: { label: "补全中", variant: "warm" },
+    completed: { label: "已完成", variant: "default" },
+    failed: { label: "失败", variant: "danger" },
+  }[backgroundState] || { label: "未知", variant: "outline" };
+
+  if (coreReady && backgroundState === "failed") {
+    return {
+      coreReady,
+      failed,
+      headline: "核心数据已生成，后台补全失败",
+      description: "数据表已经可用。失败发生在报告、控制台或知识页等附加产物，不影响你先查看核心结果。",
+      backgroundLabel: backgroundMeta.label,
+      backgroundVariant: backgroundMeta.variant,
+    };
+  }
+  if (coreReady && backgroundState === "running") {
+    return {
+      coreReady,
+      failed,
+      headline: "核心数据已生成，后台仍在补全",
+      description: "你现在就可以进入数据表查看结果；更慢的补全过程会继续在后台运行。",
+      backgroundLabel: backgroundMeta.label,
+      backgroundVariant: backgroundMeta.variant,
+    };
+  }
+  if (coreReady) {
+    return {
+      coreReady,
+      failed,
+      headline: "核心数据已生成",
+      description: "这次任务已经把核心数据表更新好了，可以直接进入数据表继续分析。",
+      backgroundLabel: backgroundMeta.label,
+      backgroundVariant: backgroundMeta.variant,
+    };
+  }
+  if (failed) {
+    return {
+      coreReady,
+      failed,
+      headline: "核心数据尚未生成",
+      description: "这次任务在核心阶段中断，所以新的数据表结果还没有落出来。先看失败原因，再决定是否重试。",
+      backgroundLabel: backgroundMeta.label,
+      backgroundVariant: backgroundMeta.variant,
+    };
+  }
+  return {
+    coreReady,
+    failed,
+    headline: "核心数据生成中",
+    description: "系统正在把这次输入转成结构化结果。核心数据表一旦生成，就可以先查看，不需要等所有后续步骤结束。",
+    backgroundLabel: backgroundMeta.label,
+    backgroundVariant: backgroundMeta.variant,
+  };
+}
+
 async function fetchJson(url) {
   const response = await fetch(url, { cache: "no-store" });
   const data = await response.json().catch(() => null);
@@ -3378,6 +3578,67 @@ function formatElapsed(startValue) {
   const hours = Math.floor(minutes / 60);
   const remainMinutes = minutes % 60;
   return `${hours} 小时 ${remainMinutes} 分`;
+}
+
+function getFocusedTaskEvents(task, liveStep) {
+  const entries = task?.stepEntries || task?.recentSteps || [];
+  const action = liveStep?.action || task?.current_step;
+  if (!action) {
+    return entries.slice(-8);
+  }
+  const filtered = entries.filter((entry) => entry.action === action);
+  return (filtered.length ? filtered : entries).slice(-10);
+}
+
+function summarizeTaskEventDetails(entry) {
+  const details = [];
+  const push = (label, value) => {
+    if (value === undefined || value === null || value === "") return;
+    if (Array.isArray(value)) {
+      if (!value.length) return;
+      details.push(`${label}：${value.join(" / ")}`);
+      return;
+    }
+    details.push(`${label}：${String(value)}`);
+  };
+
+  push("来源", entry.sources);
+  push("分块", entry.chunks);
+  push("事实", entry.claims);
+  push("实体", entry.entities);
+  push("关系", entry.relations);
+  push("事件", entry.events);
+  push("冲突", entry.conflicts);
+  push("占位", entry.placeholders);
+  push("版本", entry.version);
+  push("表数量", entry.tables);
+  push("警告", entry.warnings);
+  push("已重建", entry.rebuilt_tables);
+  push("数据库", entry.databases);
+  push("输出", entry.output);
+  push("是否复用规划", entry.reused === true ? "是" : entry.reused === false ? "否" : "");
+
+  if (details.length) {
+    return details;
+  }
+
+  const ignored = new Set([
+    "timestamp",
+    "task_id",
+    "action",
+    "status",
+    "agent",
+    "resume_hint",
+  ]);
+  return Object.entries(entry || {})
+    .filter(([key, value]) => !ignored.has(key) && value !== null && value !== undefined && value !== "")
+    .slice(0, 6)
+    .map(([key, value]) => {
+      if (Array.isArray(value)) {
+        return `${formatColumnLabel(key)}：${value.join(" / ")}`;
+      }
+      return `${formatColumnLabel(key)}：${String(value)}`;
+    });
 }
 
 function condenseStepEntries(steps) {
