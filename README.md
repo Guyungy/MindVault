@@ -1,7 +1,28 @@
 # MindVault
 
-> **Agent 驱动的 AI 知识系统**  
-> 把聊天、文档、表格中的碎片信息，沉淀成可追溯、可治理、可持续演化的知识资产。
+<p align="center">
+  <b>Agent 驱动的 AI 知识系统</b><br/>
+  把聊天、文档、表格中的碎片信息，沉淀成可追溯、可治理、可持续演化的知识资产。
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#core-capabilities">Core Capabilities</a> ·
+  <a href="#how-it-works">How It Works</a> ·
+  <a href="#current-structure">Structure</a>
+</p>
+
+---
+
+## At a glance
+
+MindVault 将原始信息先抽象为带证据链的 **claims**（含来源与置信度），再合并为可演化的 **Canonical Knowledge Base**。
+
+- **可追溯**：每条知识都有来源引用与信心分数
+- **可治理**：自动识别冲突、缺失字段、Schema 演化候选
+- **可回放**：每次运行生成 snapshot 与 changelog
+- **可读**：输出 Markdown 报告、Dashboard、图谱数据
+
 
 MindVault 不是一个只会“抽取字段”的工具，它更像一个持续运行的知识引擎。系统可以读取聊天记录、文档、表格、报告等多种数据源，通过多个 Agent 自动抽取实体、关系和事件，再将这些信息组织成一个不断更新的结构化知识库。
 
