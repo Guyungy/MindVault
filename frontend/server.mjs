@@ -421,6 +421,7 @@ async function handleModelConfigUpdate(req, res) {
       parse: providerId,
       insight: providerId,
       report: providerId,
+      multi_db: providerId,
     };
 
     await writeFile(modelConfigPath, JSON.stringify(config, null, 2), "utf-8");
@@ -1132,7 +1133,7 @@ function summarizeStepTimeline(steps) {
 
 function extractStepOutputs(step) {
   const outputs = [];
-  for (const key of ["output", "outputs", "version", "chunks", "claims", "entities", "relations", "events", "conflicts", "placeholders", "count", "sources"]) {
+  for (const key of ["output", "outputs", "version", "chunks", "claims", "entities", "relations", "events", "conflicts", "placeholders", "count", "sources", "table_name", "row_count", "duration_s"]) {
     if (step[key] === undefined || step[key] === null) continue;
     outputs.push(`${key}: ${Array.isArray(step[key]) ? step[key].join(", ") : String(step[key])}`);
   }

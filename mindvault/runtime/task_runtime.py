@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict
 import json
+import time
 
 
 class TaskRuntime:
@@ -65,8 +66,29 @@ class TaskRuntime:
                 "status": status,
             }
             entry.update(extra)
-            with self.step_log_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self._append_step_entry(entry)
+
+    def push_table_ready(self, table: Dict[str, Any]) -> None:
+        with self._lock:
+            timestamp = datetime.utcnow().isoformat()
+            if self.state.get("status") == "running":
+                self.state["last_heartbeat"] = timestamp
+                self.state["resume_hint"] = f"Table ready: {table.get('name', '')}"
+                self._save()
+            self._append_step_entry(
+                {
+                    "timestamp": timestamp,
+                    "task_id": self.task_id,
+                    "action": "multi_db",
+                    "status": "table_ready",
+                    "event": "table_ready",
+                    "table_name": table.get("name", ""),
+                    "built_by": table.get("built_by", "unknown"),
+                    "columns": table.get("columns", []),
+                    "row_count": table.get("row_count", len(table.get("rows", []) or [])),
+                    "ts": time.time(),
+                }
+            )
 
     def add_artifact(self, name: str, path: str) -> None:
         with self._lock:
@@ -105,3 +127,7 @@ class TaskRuntime:
 
     def _save(self) -> None:
         self.task_path.write_text(json.dumps(self.state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _append_step_entry(self, entry: Dict[str, Any]) -> None:
+        with self.step_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")

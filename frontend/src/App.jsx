@@ -139,6 +139,7 @@ const STEP_LABELS = {
 const TRACE_EVENT_LABELS = {
   agent_executed: "智能体执行",
   parse_chunk: "分块解析",
+  perf: "性能采样",
   task_started: "任务开始",
   task_completed: "任务完成",
   task_failed: "任务失败",
@@ -194,16 +195,18 @@ function AppShell() {
   const [ingestStatus, setIngestStatus] = useState(null);
   const [isPollingTask, setIsPollingTask] = useState(false);
 
-  const tables = payload?.tables || payload?.multiDb?.databases || [];
-  const businessTables = tables.filter((table) => table.visibility !== "system");
-  const systemTables = tables.filter((table) => table.visibility === "system");
-  const visibleTables = showSystemTables ? systemTables : businessTables;
   const tasks = payload?.tasks || [];
   const trace = payload?.trace || [];
   const recentSources = payload?.recentSources || [];
   const latestTask = payload?.latestTask || tasks[0] || null;
+  const latestReadyTables = getReadyTables(latestTask);
+  const officialTables = payload?.tables || payload?.multiDb?.databases || [];
+  const tables = mergeDisplayTables(officialTables, latestReadyTables);
+  const businessTables = tables.filter((table) => table.visibility !== "system");
+  const systemTables = tables.filter((table) => table.visibility === "system");
+  const visibleTables = showSystemTables ? systemTables : businessTables;
   const shouldPollTasks = isPollingTask || tasks.some((task) => ["running", "queued"].includes(task.status));
-  const activeTableData = visibleTables.find((table) => table.name === activeTable) || visibleTables[0] || null;
+  const activeTableData = visibleTables.find((table) => getTableKey(table) === activeTable) || visibleTables[0] || null;
   const totalRows = businessTables.reduce((sum, table) => sum + (table.rows || []).length, 0);
   const activeTasks = tasks.filter((task) => task.status === "running").length;
   const queuedTasks = tasks.filter((task) => task.status === "queued").length;
@@ -287,8 +290,8 @@ function AppShell() {
 
   useEffect(() => {
     if (!visibleTables.length) return;
-    if (!visibleTables.some((table) => table.name === activeTable)) {
-      setActiveTable(visibleTables[0].name);
+    if (!visibleTables.some((table) => getTableKey(table) === activeTable)) {
+      setActiveTable(getTableKey(visibleTables[0]));
     }
   }, [visibleTables, activeTable]);
 
@@ -806,10 +809,11 @@ function AppShell() {
                   key={`${workspaceId}:${showSystemTables ? "system" : "business"}`}
                   workspaceId={payload?.workspace || workspaceId}
                   tables={visibleTables}
-              recentSources={recentSources}
-              businessCount={businessTables.length}
-              systemCount={systemTables.length}
-              showSystemTables={showSystemTables}
+                  recentSources={recentSources}
+                  businessCount={businessTables.length}
+                  systemCount={systemTables.length}
+                  showSystemTables={showSystemTables}
+                  taskStatus={getEffectiveTaskStatus(latestTask)}
                   onToggleVisibility={setShowSystemTables}
                   activeTable={activeTable}
                   onActiveTableChange={setActiveTable}
@@ -955,6 +959,7 @@ function TablesView({
   businessCount,
   systemCount,
   showSystemTables,
+  taskStatus,
   onToggleVisibility,
   activeTable,
   onActiveTableChange,
@@ -963,7 +968,7 @@ function TablesView({
   const [selectedRowIndex, setSelectedRowIndex] = useState(0);
   const [pendingTargetId, setPendingTargetId] = useState("");
   const [viewMode, setViewMode] = useState("table");
-  const current = tables.find((table) => table.name === activeTable) || tables[0] || null;
+  const current = tables.find((table) => getTableKey(table) === activeTable) || tables[0] || null;
   const currentRows = filteredRows;
   const heroColumn = getPrimaryColumn(current);
   const referenceMap = buildReferenceMap(tables);
@@ -972,6 +977,7 @@ function TablesView({
   const selectedSources = selectedRow ? buildRowSourceSnippets(selectedRow, recentSources) : [];
   const visibleColumns = getVisibleColumns(current);
   const rowIdentity = selectedRow?.id || selectedRow?.entity_id || selectedRow?.event_id || selectedRow?.claim_id || selectedRow?.relation_id;
+  const previewTables = tables.filter((table) => table?._preview);
 
   useEffect(() => {
     setSelectedRowIndex(0);
@@ -1018,17 +1024,19 @@ function TablesView({
           <div className="space-y-1">
             {tables.map((table) => (
               <button
-                key={table.name}
+                key={getTableKey(table)}
                 className={`w-full border-b border-[var(--border)]/50 px-2 py-2.5 text-left transition ${
-                  current?.name === table.name
+                  getTableKey(current) === getTableKey(table)
                     ? "bg-[var(--accent)] text-[var(--foreground)]"
                     : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
                 }`}
-                onClick={() => onActiveTableChange(table.name)}
+                onClick={() => onActiveTableChange(getTableKey(table))}
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="truncate font-medium whitespace-nowrap">{formatTableTitle(table)}</div>
-                  <Badge variant={current?.name === table.name ? "default" : "outline"}>{(table.rows || []).length}</Badge>
+                  <Badge variant={getTableKey(current) === getTableKey(table) ? "default" : "outline"}>
+                    {table.row_count ?? (table.rows || []).length}
+                  </Badge>
                 </div>
                 <div className="mt-1 truncate text-xs text-[var(--muted-foreground)]">{formatTableDescription(table) || previewColumns(table.columns)}</div>
               </button>
@@ -1039,6 +1047,30 @@ function TablesView({
       </Card>
 
       <div className="space-y-5">
+        {taskStatus !== "completed" && previewTables.length ? (
+          <Card className="bg-transparent">
+            <CardHeader className="border-b border-[var(--border)]/60 pb-3">
+              <CardTitle>实时产出</CardTitle>
+              <CardDescription>后台处理中，更多表即将出现。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {previewTables.map((table) => (
+                  <div key={getTableKey(table)} className="rounded-[calc(var(--radius)+0.25rem)] border bg-[var(--background)] px-4 py-4">
+                    <div className="flex items-center gap-2">
+                      <div className="truncate text-sm font-medium text-[var(--foreground)]">{table.table_name || table.name}</div>
+                      <BuiltByBadge builtBy={table.built_by} />
+                    </div>
+                    <div className="mt-2 text-xs text-[var(--muted-foreground)]">
+                      {(table.columns || []).length} 列 · {table.row_count ?? 0} 行
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--muted-foreground)]">{previewColumns(table.columns)}</div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
       <Card className="bg-transparent">
         <CardHeader className="border-b border-[var(--border)]/60 pb-3">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1048,9 +1080,10 @@ function TablesView({
             </div>
             {current ? (
               <div className="flex flex-wrap gap-2">
-                <Badge variant="outline">{(current.rows || []).length} 条记录</Badge>
+                <Badge variant="outline">{current.row_count ?? (current.rows || []).length} 条记录</Badge>
                 <Badge variant="outline">{getVisibleColumns(current).length} 个字段</Badge>
                 {getHiddenMetaColumns(current).length ? <Badge variant="outline">隐藏 {getHiddenMetaColumns(current).length} 个系统字段</Badge> : null}
+                {current.built_by ? <BuiltByBadge builtBy={current.built_by} /> : null}
               </div>
             ) : null}
           </div>
@@ -1068,7 +1101,7 @@ function TablesView({
               </div>
               {viewMode === "table" ? (
                 <DataTable
-                  tableId={`${workspaceId || "workspace"}:table:${current.name}`}
+                  tableId={`${workspaceId || "workspace"}:table:${getTableKey(current)}`}
                   columns={tableColumns}
                   data={filteredRows}
                   filterColumnId={heroColumn}
@@ -1808,6 +1841,8 @@ function OverviewView({
     .sort((left, right) => (right.rows || []).length - (left.rows || []).length)
     .slice(0, 4);
   const recentTrace = trace.slice(0, 5);
+  const recentPerf = getRecentPerfEntries(trace, 4);
+  const readyTables = getReadyTables(latestTask).slice(0, 3);
   const graphNodeCount = graph?.metadata?.node_count || (graph?.nodes || []).length || 0;
   const graphEdgeCount = graph?.metadata?.edge_count || (graph?.edges || []).length || 0;
   const currentNodeCount = currentIngestGraph?.metadata?.node_count || (currentIngestGraph?.nodes || []).length || 0;
@@ -1905,6 +1940,64 @@ function OverviewView({
           </CardContent>
         </Card>
       </div>
+
+      {readyTables.length || recentPerf.length ? (
+        <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+          <Card>
+            <CardHeader>
+              <CardTitle>增量建表</CardTitle>
+              <CardDescription>最近任务已经先产出的表，会早于全量导出显示在这里。</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {readyTables.length ? (
+                readyTables.map((table) => (
+                  <div key={table.table_name} className="rounded-[calc(var(--radius)+0.25rem)] border bg-[var(--background)] px-4 py-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium">{table.table_name}</div>
+                      <BuiltByBadge builtBy={table.built_by} />
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs text-[var(--muted-foreground)]">
+                      <span>{table.row_count || 0} 行</span>
+                      <span>·</span>
+                      <span>{(table.columns || []).length} 列</span>
+                      <span>·</span>
+                      <span>{previewColumns(table.columns)}</span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-[var(--muted-foreground)]">最近任务还没有提前产出的数据表。</div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>最近性能采样</CardTitle>
+              <CardDescription>从 agent trace 提取的 database_plan / multi_db 耗时。</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {recentPerf.length ? (
+                recentPerf.map((entry, index) => (
+                  <div key={`${entry.timestamp || index}-perf`} className="rounded-[calc(var(--radius)+0.25rem)] border bg-[var(--background)] px-4 py-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium">{formatStepLabel(entry.step || entry.action || "perf")}</div>
+                      <Badge variant="outline">{entry.timestamp || "-"}</Badge>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {summarizeTraceDetails(entry).map((item) => (
+                        <Badge key={item} variant="outline">{item}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-[var(--muted-foreground)]">当前还没有性能采样记录。</div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
       <Card>
@@ -2120,6 +2213,7 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDelete
   const liveStep = findLiveStep(selectedTask);
   const progress = selectedTask ? summarizeTaskProgress(selectedTask, coreTimeline) : null;
   const resultSummary = selectedTask ? summarizeTaskResult(selectedTask) : null;
+  const readyTables = getReadyTables(selectedTask);
 
   return (
     <div className="grid gap-4 xl:grid-cols-[240px_1fr]">
@@ -2342,6 +2436,38 @@ function TasksView({ tasks, selectedTask, selectedTaskId, onSelectTask, onDelete
                         )}
                       </div>
                     </ScrollArea>
+                  </div>
+                </div>
+              ) : null}
+
+              {readyTables.length ? (
+                <div className="border-t border-[var(--border)]/70 pt-4">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-[var(--foreground)]">已提前就绪的数据表</div>
+                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">这部分来自 `table_ready` 事件，不需要等整个 multi_db 完成。</div>
+                    </div>
+                    <Badge variant="outline">{readyTables.length} 张</Badge>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {readyTables.map((table) => (
+                      <div key={table.table_name} className="rounded-[calc(var(--radius)+0.25rem)] border bg-[var(--background)] px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="font-medium text-[var(--foreground)]">{table.table_name}</div>
+                            <div className="mt-1 text-xs text-[var(--muted-foreground)]">{formatTaskTime(table.timestamp)}</div>
+                          </div>
+                          <BuiltByBadge builtBy={table.built_by} />
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2 text-xs text-[var(--muted-foreground)]">
+                          <span>{table.row_count || 0} 行</span>
+                          <span>·</span>
+                          <span>{(table.columns || []).length} 列</span>
+                          <span>·</span>
+                          <span>{previewColumns(table.columns)}</span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ) : null}
@@ -3089,6 +3215,7 @@ function mapStepStatus(status) {
     running: "运行中",
     ok: "完成",
     fallback: "回退",
+    table_ready: "表已就绪",
     failed: "失败",
     blocked: "阻塞",
   };
@@ -3839,6 +3966,73 @@ function formatElapsed(startValue) {
   return `${hours} 小时 ${remainMinutes} 分`;
 }
 
+function formatDurationSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "-";
+  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 0 : 2)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainSeconds = Math.round(seconds % 60);
+  return `${minutes} 分 ${remainSeconds} 秒`;
+}
+
+function formatBuildSource(value) {
+  const key = String(value || "").trim();
+  const mapping = {
+    rule: { label: "规则", bg: "#E1F5EE", color: "#0F6E56" },
+    learned: { label: "已学习", bg: "#EEEDFE", color: "#534AB7" },
+    fallback: { label: "降级", bg: "#FAEEDA", color: "#854F0B" },
+    direct: { label: "直接", bg: "#E6F1FB", color: "#185FA5" },
+    llm: { label: "LLM", bg: "#F1EFE8", color: "#5F5E5A" },
+    unknown: { label: "未知", bg: "#F1EFE8", color: "#5F5E5A" },
+  };
+  return mapping[key] || mapping.llm;
+}
+
+function BuiltByBadge({ builtBy }) {
+  const style = formatBuildSource(builtBy);
+  return (
+    <span
+      style={{
+        fontSize: 11,
+        padding: "2px 8px",
+        borderRadius: 20,
+        background: style.bg,
+        color: style.color,
+        flexShrink: 0,
+      }}
+    >
+      {style.label}
+    </span>
+  );
+}
+
+function getTableKey(table) {
+  return String(table?.name || table?.table_name || "").trim();
+}
+
+function mergeDisplayTables(officialTables = [], readyTables = []) {
+  const normalizedOfficial = (officialTables || []).map((table) => ({
+    ...table,
+    name: getTableKey(table),
+    table_name: table?.table_name || getTableKey(table),
+    _preview: false,
+  }));
+  const officialNames = new Set(normalizedOfficial.map((table) => getTableKey(table)));
+  const previewTables = (readyTables || [])
+    .filter((table) => !officialNames.has(getTableKey(table)))
+    .map((table) => ({
+      ...table,
+      name: getTableKey(table),
+      table_name: table?.table_name || getTableKey(table),
+      title: table?.title || table?.table_name || getTableKey(table),
+      description: table?.description || "实时建表预览，完整数据将在任务完成后同步。",
+      rows: [],
+      visibility: table?.visibility || "business",
+      _preview: true,
+    }));
+  return [...normalizedOfficial, ...previewTables];
+}
+
 function getFocusedTaskEvents(task, liveStep) {
   const entries = task?.stepEntries || task?.recentSteps || [];
   const action = liveStep?.action || task?.current_step;
@@ -3847,6 +4041,43 @@ function getFocusedTaskEvents(task, liveStep) {
   }
   const filtered = entries.filter((entry) => entry.action === action);
   return (filtered.length ? filtered : entries).slice(-10);
+}
+
+function getReadyTables(task) {
+  const entries = task?.stepEntries || task?.recentSteps || [];
+  const tables = new Map();
+  for (const entry of entries) {
+    if (entry?.event !== "table_ready" || !entry?.table_name) continue;
+    tables.set(entry.table_name, {
+      table_name: entry.table_name,
+      built_by: entry.built_by || "unknown",
+      columns: Array.isArray(entry.columns)
+        ? entry.columns.map((column) => (column && typeof column === "object" ? column.name || JSON.stringify(column) : column))
+        : [],
+      row_count: entry.row_count || 0,
+      timestamp: entry.timestamp || entry.ts || "",
+    });
+  }
+  return [...tables.values()].sort((left, right) => {
+    const leftTime = parseTaskDate(left.timestamp)?.getTime() || 0;
+    const rightTime = parseTaskDate(right.timestamp)?.getTime() || 0;
+    return rightTime - leftTime;
+  });
+}
+
+function getRecentPerfEntries(trace, limit = 6) {
+  return (trace || []).filter((entry) => entry?.event === "perf").slice(0, limit);
+}
+
+function summarizeTraceDetails(entry) {
+  const details = [];
+  if (entry?.step) details.push(formatStepLabel(entry.step));
+  if (entry?.table) details.push(`表：${entry.table}`);
+  if (entry?.built_by) details.push(`来源：${formatBuildSource(entry.built_by).label}`);
+  if (entry?.duration_s !== undefined) details.push(`耗时：${formatDurationSeconds(entry.duration_s)}`);
+  if (entry?.plan_reused === true) details.push("复用规划：是");
+  if (entry?.plan_reused === false) details.push("复用规划：否");
+  return details;
 }
 
 function summarizeTaskEventDetails(entry) {
@@ -3875,6 +4106,10 @@ function summarizeTaskEventDetails(entry) {
   push("已重建", entry.rebuilt_tables);
   push("数据库", entry.databases);
   push("输出", entry.output);
+  push("数据表", entry.table_name);
+  push("来源", entry.built_by ? formatBuildSource(entry.built_by).label : "");
+  push("行数", entry.row_count);
+  push("耗时", entry.duration_s !== undefined ? formatDurationSeconds(entry.duration_s) : "");
   push("是否复用规划", entry.reused === true ? "是" : entry.reused === false ? "否" : "");
 
   if (details.length) {

@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 
+import mindvault.runtime.rule_builder as rule_builder
 from main import run_pipeline
 from mindvault.runtime.models import NormalizedChunk
 from mindvault.runtime.app import VaultRuntime, load_sources_from_path
@@ -18,12 +19,21 @@ class MindVaultV02Tests(unittest.TestCase):
     def setUp(self):
         self.workspace = "test_v02"
         self.workspace_path = Path("output/workspaces") / self.workspace
+        self.global_parse_cache_path = Path("config/parse_cache_global.json")
         if self.workspace_path.exists():
             shutil.rmtree(self.workspace_path)
+        if self.global_parse_cache_path.exists():
+            self.global_parse_cache_path.unlink()
 
     def tearDown(self):
-        if self.workspace_path.exists():
-            shutil.rmtree(self.workspace_path)
+        for path in [
+            self.workspace_path,
+            self.workspace_path.parent / f"{self.workspace}_other",
+        ]:
+            if path.exists():
+                shutil.rmtree(path)
+        if self.global_parse_cache_path.exists():
+            self.global_parse_cache_path.unlink()
 
     def _mock_parse_result(self, text: str):
         if "Alice" in text:
@@ -394,6 +404,187 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(plan["databases"][0]["name"], "products")
         self.assertEqual(plan["databases"][0]["row_source"], "entities")
 
+    def test_generate_database_plan_prefers_rule_builder_for_known_entity_types(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock()
+
+        plan = runtime._generate_database_plan(
+            {
+                "entities": [
+                    {
+                        "id": "ent_person_alice",
+                        "name": "Alice",
+                        "type": "person",
+                        "confidence": 0.95,
+                        "attributes": {"role": "owner"},
+                    },
+                    {
+                        "id": "ent_project_mv",
+                        "name": "MindVault",
+                        "type": "project",
+                        "confidence": 0.91,
+                        "attributes": {"status": "active"},
+                    },
+                ],
+                "claims": [],
+                "relations": [],
+                "events": [],
+            },
+            {"conflicts": {"conflicts": []}, "placeholders": []},
+        )
+
+        plan_names = {database["name"] for database in plan["databases"]}
+        self.assertEqual(runtime.executor.execute.call_count, 0)
+        self.assertIn("persons", plan_names)
+        self.assertIn("projects", plan_names)
+        self.assertIn("sources", plan_names)
+
+    def test_generate_database_plan_prefers_learned_schema_before_static_rules(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock()
+        learned_cache = self.workspace_path / "learned_schemas.json"
+        state = {
+            "entities": [
+                {
+                    "id": "ent_person_alice",
+                    "name": "Alice",
+                    "type": "person",
+                    "confidence": 0.95,
+                    "attributes": {"role": "owner"},
+                },
+                {
+                    "id": "ent_project_mv",
+                    "name": "MindVault",
+                    "type": "project",
+                    "confidence": 0.91,
+                    "attributes": {"status": "active"},
+                },
+            ],
+            "claims": [],
+            "relations": [],
+            "events": [],
+        }
+        learned_plan = {
+            "domain": "portfolio_domain",
+            "databases": [
+                {
+                    "name": "portfolio_rollups",
+                    "title": "项目组合总览",
+                    "entity_types": [],
+                    "row_source": "mixed",
+                    "record_granularity": "summary",
+                    "suggested_fields": ["id", "project_id", "owner", "status"],
+                    "visibility": "business",
+                }
+            ],
+            "relations": [],
+        }
+
+        with mock.patch.object(rule_builder, "LEARNED_CACHE_PATH", learned_cache):
+            rule_builder.save_learned_schema(["person", "project"], ["typed_entities"], learned_plan)
+            plan = runtime._generate_database_plan(
+                state,
+                {"conflicts": {"conflicts": []}, "placeholders": []},
+            )
+
+        self.assertEqual(runtime.executor.execute.call_count, 0)
+        self.assertEqual(plan.get("built_by"), "learned")
+        self.assertEqual(plan["databases"][0]["name"], "portfolio_rollups")
+
+    def test_generate_database_plan_saves_llm_plan_to_learned_cache(self):
+        runtime = VaultRuntime(self.workspace)
+        learned_cache = self.workspace_path / "learned_schemas.json"
+        runtime.executor.execute = mock.Mock(
+            return_value={
+                "domain": "Test Domain",
+                "databases": [
+                    {
+                        "name": "activity_summaries",
+                        "title": "活动摘要",
+                        "entity_types": [],
+                        "row_source": "mixed",
+                        "record_granularity": "summary",
+                        "suggested_fields": ["id", "summary", "topic"],
+                        "visibility": "business",
+                    }
+                ],
+                "relations": [],
+            }
+        )
+
+        with mock.patch.object(rule_builder, "LEARNED_CACHE_PATH", learned_cache):
+            plan = runtime._generate_database_plan(
+                {
+                    "entities": [
+                        {
+                            "id": "ent_activity_safe_doc",
+                            "name": "广州文化中心周末活动",
+                            "type": "activity_summary_source",
+                            "confidence": 0.94,
+                            "attributes": {"location": "天河区"},
+                        }
+                    ],
+                    "claims": [
+                        {
+                            "id": "claim_safe_doc_price",
+                            "subject": "ent_activity_safe_doc",
+                            "predicate": "location",
+                            "object": "天河区",
+                            "claim_type": "fact",
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "relations": [],
+                    "events": [],
+                },
+                {"conflicts": {"conflicts": []}, "placeholders": []},
+            )
+            cached = rule_builder.load_learned_schema(
+                ["activity_summary_source"],
+                ["typed_claims", "typed_entities", "predicates"],
+            )
+
+        self.assertEqual(plan["databases"][0]["name"], "activity_summaries")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["databases"][0]["name"], "activity_summaries")
+
+    def test_generate_database_plan_falls_back_when_ontology_agent_fails(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock(return_value={"_agent_error": "HTTP Error 500: Internal Server Error"})
+
+        plan = runtime._generate_database_plan(
+            {
+                "entities": [
+                    {
+                        "id": "ent_activity_safe_doc",
+                        "name": "广州文化中心周末活动",
+                        "type": "activity_summary_source",
+                        "confidence": 0.94,
+                        "attributes": {"location": "天河区"},
+                    }
+                ],
+                "claims": [
+                    {
+                        "id": "claim_safe_doc_price",
+                        "subject": "ent_activity_safe_doc",
+                        "predicate": "location",
+                        "object": "天河区",
+                        "claim_type": "fact",
+                        "confidence": 0.8,
+                    }
+                ],
+                "relations": [],
+                "events": [],
+            },
+            {"conflicts": {"conflicts": []}, "placeholders": []},
+        )
+
+        plan_names = {database["name"] for database in plan["databases"]}
+        self.assertEqual(plan.get("built_by"), "fallback")
+        self.assertIn("activity_summary_sources", plan_names)
+        self.assertIn("claims", plan_names)
+        self.assertIn("sources", plan_names)
+
     def test_detect_source_type_promotes_chat_like_doc_content_to_chat(self):
         runtime = VaultRuntime(self.workspace)
         source = {
@@ -518,6 +709,7 @@ class MindVaultV02Tests(unittest.TestCase):
 
     def test_parse_cache_reuses_same_chunk_result(self):
         runtime = VaultRuntime(self.workspace)
+        global_cache = self.workspace_path / "parse_cache_global.json"
         chunk = NormalizedChunk(
             chunk_id="chunk_1",
             source_id="src_1",
@@ -534,10 +726,50 @@ class MindVaultV02Tests(unittest.TestCase):
             }
         )
 
-        runtime._execute_parse_chunk(Path("mindvault/agents/parse_agent.yaml"), chunk)
-        runtime._execute_parse_chunk(Path("mindvault/agents/parse_agent.yaml"), chunk)
+        with mock.patch.object(runtime, "_global_parse_cache_path", global_cache):
+            runtime._execute_parse_chunk(Path("mindvault/agents/parse_agent.yaml"), chunk)
+            runtime._execute_parse_chunk(Path("mindvault/agents/parse_agent.yaml"), chunk)
 
         self.assertEqual(runtime.executor.execute.call_count, 1)
+
+    def test_parse_cache_reuses_same_chunk_across_workspaces_via_global_cache(self):
+        global_cache = self.workspace_path / "parse_cache_global.json"
+        chunk = NormalizedChunk(
+            chunk_id="chunk_1",
+            source_id="src_1",
+            chunk_type="section",
+            text="Alice: hello\nBob: hi",
+            context_hints={"source_type": "chat", "language": "en"},
+        )
+
+        runtime_a = VaultRuntime(self.workspace)
+        runtime_a.executor.execute = mock.Mock(
+            return_value={
+                "claims": [],
+                "entity_candidates": [],
+                "relation_candidates": [],
+                "event_candidates": [],
+            }
+        )
+        with mock.patch.object(runtime_a, "_global_parse_cache_path", global_cache):
+            runtime_a._execute_parse_chunk(Path("mindvault/agents/parse_agent.yaml"), chunk)
+            runtime_a._save_parse_cache()
+
+        runtime_b = VaultRuntime(f"{self.workspace}_other")
+        runtime_b._global_parse_cache_path = global_cache
+        runtime_b._global_parse_cache = runtime_b._load_json_cache(global_cache)
+        runtime_b.executor.execute = mock.Mock(
+            return_value={
+                "claims": [{"id": "should_not_run"}],
+                "entity_candidates": [],
+                "relation_candidates": [],
+                "event_candidates": [],
+            }
+        )
+        result = runtime_b._execute_parse_chunk(Path("mindvault/agents/parse_agent.yaml"), chunk)
+
+        self.assertEqual(runtime_b.executor.execute.call_count, 0)
+        self.assertEqual(result["claims"], [])
 
     def test_finalize_multi_db_prunes_duplicate_derived_business_tables(self):
         runtime = VaultRuntime(self.workspace)
@@ -779,6 +1011,60 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(multi_db["databases"][0]["rows"][0]["name"], "Alice")
         self.assertEqual(multi_db["databases"][0]["rows"][0]["role"], "admin")
 
+    def test_generate_multi_db_builds_rule_tables_for_mixed_entity_specs(self):
+        runtime = VaultRuntime(self.workspace)
+        runtime.executor.execute = mock.Mock()
+        database_plan = {
+            "domain": "product_domain",
+            "databases": [
+                {
+                    "name": "products",
+                    "title": "products",
+                    "description": "product entities",
+                    "suggested_fields": ["id", "name", "type", "project_id"],
+                    "visibility": "business",
+                    "row_source": "mixed",
+                    "entity_types": ["product"],
+                }
+            ],
+            "relations": [],
+        }
+        state = {
+            "entities": [
+                {
+                    "id": "ent_product_claw",
+                    "name": "OpenClaw",
+                    "type": "product",
+                    "confidence": 0.96,
+                    "attributes": {"status": "active"},
+                },
+                {
+                    "id": "ent_project_mv",
+                    "name": "MindVault",
+                    "type": "project",
+                    "confidence": 0.92,
+                    "attributes": {"owner": "Alice"},
+                },
+            ],
+            "claims": [],
+            "relations": [
+                {
+                    "source": "ent_product_claw",
+                    "relation": "belongs_to",
+                    "target": "ent_project_mv",
+                    "confidence": 0.88,
+                }
+            ],
+            "events": [],
+        }
+
+        multi_db, warnings = runtime._generate_multi_db(state, database_plan)
+
+        self.assertEqual(runtime.executor.execute.call_count, 0)
+        self.assertEqual(warnings, [])
+        self.assertEqual(multi_db["databases"][0]["built_by"], "rule")
+        self.assertEqual(multi_db["databases"][0]["rows"][0]["project_id"], "ent_project_mv")
+
     def test_build_graph_payload_creates_nodes_and_edges_from_state(self):
         runtime = VaultRuntime(self.workspace)
         state = {
@@ -963,6 +1249,31 @@ class MindVaultV02Tests(unittest.TestCase):
         self.assertEqual(task_json["current_step"], "parse")
         self.assertGreaterEqual(len(step_log), 1)
 
+    def test_task_runtime_push_table_ready_records_event(self):
+        task_root = self.workspace_path / "tasks"
+        runtime = TaskRuntime(task_root, goal="Test goal", workspace_id=self.workspace)
+        runtime.start()
+        runtime.push_table_ready(
+            {
+                "name": "products",
+                "built_by": "rule",
+                "columns": ["id", "name"],
+                "row_count": 3,
+            }
+        )
+
+        entries = [
+            json.loads(line)
+            for line in (runtime.task_dir / "step_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
+            if line.strip()
+        ]
+        latest = entries[-1]
+
+        self.assertEqual(latest["event"], "table_ready")
+        self.assertEqual(latest["status"], "table_ready")
+        self.assertEqual(latest["table_name"], "products")
+        self.assertEqual(latest["built_by"], "rule")
+
     def test_bash_runner_captures_stdout_and_exit_code(self):
         runner = BashRunner(self.workspace_path / "stdout")
         result = runner.run("printf 'hello'", timeout_seconds=5, cwd=self.workspace_path)
@@ -1023,10 +1334,10 @@ class MindVaultV02Tests(unittest.TestCase):
             if path_text.endswith("parse_agent.yaml"):
                 return {
                     "claims": [
-                        {"id": "claim_safe_doc_price", "subject": "ent_venue_safe_doc", "predicate": "location", "object": "天河区", "confidence": 0.8},
+                        {"id": "claim_safe_doc_price", "subject": "ent_activity_safe_doc", "predicate": "location", "object": "天河区", "confidence": 0.8},
                     ],
                     "entity_candidates": [
-                        {"id": "ent_venue_safe_doc", "name": "广州文化中心", "type": "venue", "attributes": {"location": "天河区"}},
+                        {"id": "ent_activity_safe_doc", "name": "广州文化中心周末活动", "type": "activity_summary_source", "attributes": {"location": "天河区"}},
                     ],
                     "relation_candidates": [],
                     "event_candidates": [],
@@ -1065,6 +1376,45 @@ class MindVaultV02Tests(unittest.TestCase):
         task_json = json.loads(latest_task_path.read_text(encoding="utf-8"))
 
         self.assertEqual(task_json["status"], "failed")
+
+    def test_ontology_agent_failure_falls_back_and_pipeline_completes(self):
+        runtime = VaultRuntime(self.workspace)
+        original_execute = runtime.executor.execute
+
+        def fake_execute(agent_path, context, **kwargs):
+            path_text = str(agent_path)
+            if path_text.endswith("parse_agent.yaml"):
+                return {
+                    "claims": [
+                        {"id": "claim_safe_doc_price", "subject": "ent_activity_safe_doc", "predicate": "location", "object": "天河区", "claim_type": "fact", "confidence": 0.8},
+                    ],
+                    "entity_candidates": [
+                        {"id": "ent_activity_safe_doc", "name": "广州文化中心周末活动", "type": "activity_summary_source", "attributes": {"location": "天河区"}},
+                    ],
+                    "relation_candidates": [],
+                    "event_candidates": [],
+                }
+            if path_text.endswith("ontology_agent.yaml"):
+                return {"_agent_error": "HTTP Error 500: Internal Server Error"}
+            return original_execute(agent_path, context)
+
+        runtime.executor.execute = fake_execute
+        result = runtime.ingest([
+            {
+                "source_id": "safe_doc",
+                "source_type": "doc",
+                "content": "广州文化中心在天河区提供周末亲子阅读活动，可线上预约报名。",
+            }
+        ])
+
+        self.assertIn("multi_db", result)
+        latest_task_path = sorted((self.workspace_path / "tasks").glob("task_*/task.json"))[-1]
+        task_json = json.loads(latest_task_path.read_text(encoding="utf-8"))
+        database_plan = json.loads((self.workspace_path / "multi_db" / "database_plan.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(task_json["status"], "completed")
+        self.assertEqual(database_plan.get("built_by"), "fallback")
+        self.assertEqual(database_plan["databases"][0]["built_by"], "fallback")
 
     def test_task_monitor_uses_recent_step_activity_for_running_task(self):
         now = datetime.utcnow()
